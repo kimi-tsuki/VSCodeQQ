@@ -322,6 +322,24 @@ export async function run(): Promise<void> {
     await vscode.commands.executeCommand('qq.latest');
     await until(() => editor.visibleRanges.some(r => r.end.line >= editor.document.lineCount - 3));
     checks.push('自动置底、保留草稿选区、上翻暂停、显示新消息计数、返回最新恢复跟随');
+    const originalLimit = app.store!.limit;
+    app.store!.limit = 50;
+    for (let i = 0; i < 5; i++) {
+      backend.emit({ ...backend.message(8751 + i, `历史达到上限后的消息 ${i}\n第二行`), group_id: 20002 });
+      await until(() => editor.document.getText().includes(`历史达到上限后的消息 ${i}`) && !app!.native.isUpdating(editor.document));
+      await new Promise(r => setTimeout(r, 250));
+      const gap = await ui.evaluate(`(() => {
+        const root = document.querySelector('.editor-group-container.active .monaco-editor');
+        const row = [...root.querySelectorAll('.view-line')].find(e => e.textContent.includes('自动置底时保留草稿'));
+        return row ? root.getBoundingClientRect().bottom - row.getBoundingClientRect().bottom : null;
+      })()`);
+      assert.ok(gap !== null && gap >= -2 && gap < 50, `消息 ${i} 后草稿应保持贴底，实际底部空白 ${gap}px`);
+      assert.equal(editor.document.offsetAt(editor.selection.anchor) - app.native.region(editor.document)!.start, 2);
+      assert.equal(editor.document.offsetAt(editor.selection.active) - app.native.region(editor.document)!.start, 4);
+    }
+    app.store!.limit = originalLimit;
+    checks.push('达到历史上限后连续收消息，草稿保持贴底且选区不变');
+
     backend.masks.set('20002', 4); await app.notifications!.refresh(true);
     backend.emit({ ...backend.message(8760), group_id: 20002, message: [{ type: 'at', data: { qq: '123456' } }, { type: 'text', data: { text: '请看一下' } }] });
     await until(() => !!app!.store!.chats.get('group:20002')!.mentioned);
@@ -351,7 +369,7 @@ export async function run(): Promise<void> {
     await app.native.focus(editor);
     await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
     await new Promise(r => setTimeout(r, 250));
-    const dropPoint = await ui.evaluate(`(() => { const e = [...document.querySelectorAll('.monaco-editor[data-uri]')].find(e => e.getAttribute('data-uri').includes('/20002/')); const lines = [...e.querySelectorAll('.view-line')]; const r = lines.at(-1).getBoundingClientRect(); return { x: r.left + 30, y: r.top + r.height / 2 }; })()`);
+    const dropPoint = await ui.evaluate(`(() => { const e = [...document.querySelectorAll('.monaco-editor[data-uri]')].find(e => e.getAttribute('data-uri').includes('/20002/')); const bounds = e.getBoundingClientRect(); const lines = [...e.querySelectorAll('.view-line')].map(l => l.getBoundingClientRect()).filter(r => r.top < bounds.bottom - 10 && r.bottom > bounds.top).sort((a,b) => a.top - b.top); const r = lines.at(-1); return { x: r.left + 30, y: Math.min(r.top + r.height / 2, bounds.bottom - 12) }; })()`);
     const dragData = { items: [], files: [filePath], dragOperationsMask: 1 };
     for (const type of ['dragEnter', 'dragOver', 'drop']) await ui.call('Input.dispatchDragEvent', { type, ...dropPoint, data: dragData, modifiers: 8 });
     await until(() => app!.native.draft(editor.document).includes('[文件:拖入测试.txt]'));
