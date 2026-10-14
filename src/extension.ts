@@ -48,6 +48,7 @@ export class QQApp implements vscode.Disposable {
   private replyLookups = new Map<string, Promise<boolean>>();
   private cancelled = new Set<string>();
   private memberLoaded = new Map<string, number>();
+  private memberLoading = new Map<string, Promise<void>>();
   private following = new Map<vscode.TextEditor, boolean>();
   private pendingMessages = new Map<string, number>();
   private newMessagesStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 9);
@@ -89,28 +90,31 @@ export class QQApp implements vscode.Disposable {
     this.disposables.push(this.native, vscode.workspace.registerFileSystemProvider('qqchat', this.native, { isCaseSensitive: true }));
     const selector = { scheme: 'qqchat', language: 'qq-chat' };
     this.disposables.push(vscode.languages.registerCompletionItemProvider(selector, {
-      provideCompletionItems: (doc, position) => {
+      provideCompletionItems: async (doc, position, token) => {
         const region = this.native.region(doc);
         if (!region || doc.offsetAt(position) < region.start) return [];
         const before = doc.lineAt(position.line).text.slice(0, position.character);
         const match = /(?:^|\s)(\/[\w\u4e00-\u9fff]*)$/.exec(before);
         if (!match) {
-          const at = /(?:^|\s)@([^\s@]*)$/.exec(before);
+          const at = /(?:^|[^A-Za-z0-9_])@([^\s@\[\]]*)$/.exec(before);
           const key = this.transcript?.key(doc.uri);
           if (!at || !key?.startsWith('group:')) return [];
-          const range = new vscode.Range(position.translate(0, -at[0].trimStart().length), position);
+          const store = this.store;
+          await this.loadMembers(key);
+          if (token.isCancellationRequested || store !== this.store) return [];
+          const range = new vscode.Range(position.line, before.lastIndexOf('@'), position.line, position.character);
           return [...this.store?.members.get(key)?.values() ?? []].filter(m => `${m.name} ${m.nickname} ${m.id}`.toLowerCase().includes(at[1].toLowerCase())).map(m => {
             const item = new vscode.CompletionItem(m.name, vscode.CompletionItemKind.User);
             item.filterText = `@${m.name} ${m.nickname ?? ''} ${m.id}`; item.detail = `${m.nickname ?? ''} · ${m.id}`; item.range = range; item.insertText = `@[${m.id}] `; return item;
           });
         }
         const range = new vscode.Range(position.translate(0, -match[1].length), position);
-        return ['/表情', '/emoji', '/图片', '/文件'].map((label, i) => {
+        return ['/表情', '/emoji', '/图片', '/文件', '/艾特'].map((label, i) => {
           const item = new vscode.CompletionItem(label, vscode.CompletionItemKind.Function);
           item.detail = '打开底部表情选择器 · 方向键选择 · Enter 插入 · Esc 返回';
           item.range = range; item.insertText = ''; item.sortText = String(i);
-          item.command = { command: label === '/图片' ? 'qq.insertImage' : label === '/文件' ? 'qq.insertFile' : 'qq.emojis', title: label };
-          if (i > 1) item.detail = '选择附件，在草稿光标处插入占位符';
+          item.command = { command: label === '/艾特' ? 'qq.mentionMember' : label === '/图片' ? 'qq.insertImage' : label === '/文件' ? 'qq.insertFile' : 'qq.emojis', title: label };
+          if (i > 1) item.detail = label === '/艾特' ? '选择群成员，在草稿中插入 @ 提及' : '选择附件，在草稿光标处插入占位符';
           return item;
         });
       }
@@ -410,12 +414,56 @@ export class QQApp implements vscode.Disposable {
   }
   async loadMembers(key: string): Promise<void> {
     const store = this.store, epoch = this.epoch;
-    if (!store || !key.startsWith('group:') || Date.now() - (this.memberLoaded.get(key) ?? 0) < 300000) return;
-    this.memberLoaded.set(key, Date.now());
-    try {
-      const members = await this.client.call('get_group_member_list', { group_id: splitKey(key).id }, 10000);
-      if (store === this.store && epoch === this.epoch && Array.isArray(members)) store.setMembers(key, members);
-    } catch { this.memberLoaded.delete(key); }
+    if (!store || !key.startsWith('group:') || !this.client.connected) return;
+    const lookup = `${epoch}:${key}`;
+    const pending = this.memberLoading.get(lookup); if (pending) return pending;
+    if (store.members.has(key) && Date.now() - (this.memberLoaded.get(key) ?? 0) < 300000) return;
+    const task = (async () => {
+      try {
+        const members = await this.client.call('get_group_member_list', { group_id: splitKey(key).id }, 10000);
+        if (store === this.store && epoch === this.epoch && Array.isArray(members)) {
+          store.setMembers(key, members); this.memberLoaded.set(key, Date.now());
+        }
+      } catch { /* Keep cached members; the next completion retries. */ }
+    })();
+    this.memberLoading.set(lookup, task);
+    try { await task; } finally { if (this.memberLoading.get(lookup) === task) this.memberLoading.delete(lookup); }
+  }
+  private async mentionMember(sender = false): Promise<void> {
+    const editor = vscode.window.activeTextEditor, store = this.store;
+    const key = editor && this.transcript?.key(editor.document.uri);
+    if (!editor || !store || !key?.startsWith('group:')) throw new Error('请先打开群聊，再选择要 @ 的成员');
+    let memberId: string | undefined;
+    if (sender) {
+      if (!this.native.historyMatches(editor.document)) throw new Error('请等待聊天记录更新后重试');
+      const message = this.transcript?.messageAt(editor.document.uri, editor.selection.active.line);
+      if (!message || !/^\d+$/.test(message.senderId)) throw new Error('请将光标放在要 @ 的群成员消息上');
+      memberId = message.senderId;
+    } else {
+      await this.loadMembers(key);
+      if (store !== this.store) return;
+      const members = [...store.members.get(key)?.values() ?? []];
+      if (!members.length) throw new Error('暂时无法读取群成员，请确认连接后重试');
+      const selected = await vscode.window.showQuickPick(members.map(m => ({
+        label: m.name, description: m.id, detail: m.nickname, memberId: m.id
+      })), { title: '@ 群成员', placeHolder: '搜索群名片、昵称或 QQ 号', matchOnDescription: true, matchOnDetail: true });
+      memberId = selected?.memberId;
+    }
+    if (!memberId || store !== this.store) return;
+    const text = `@[${memberId}] `;
+    if (vscode.window.activeTextEditor?.document !== editor.document) {
+      const draft = store.draft(key); store.setDraft(key, draft.text + text, draft.replyId); return;
+    }
+    const active = vscode.window.activeTextEditor!;
+    await this.native.sync(active, false);
+    if (store !== this.store) return;
+    if (vscode.window.activeTextEditor?.document !== active.document) {
+      const draft = store.draft(key); store.setDraft(key, draft.text + text, draft.replyId); return;
+    }
+    const selection = this.native.inDraft(active) ? active.selection : new vscode.Selection(
+      active.document.positionAt(active.document.getText().length), active.document.positionAt(active.document.getText().length));
+    if (!await active.edit(edit => edit.replace(selection, text))) throw new Error('草稿发生变化，请重新插入 @');
+    await this.native.focus(active);
   }
   async sendMessage(key: string, text: string, replyId?: string): Promise<boolean> {
     const store = this.store;
@@ -700,6 +748,8 @@ export class QQApp implements vscode.Disposable {
       if (editor && this.transcript?.key(editor.document.uri)) { await this.native.sync(editor, true, true); await this.native.focus(editor); }
     });
     register('qq.insertImage', () => this.composer.handleMessage({ type: 'pickImages', account: this.store?.selfId, key: this.target }));
+    register('qq.mentionMember', () => this.mentionMember());
+    register('qq.mentionSender', () => this.mentionMember(true));
     register('qq.emojis', () => this.composer.showEmojis());
     register('qq.cancelReply', async () => {
       const editor = vscode.window.activeTextEditor;

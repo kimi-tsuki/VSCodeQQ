@@ -2,7 +2,7 @@
   "name": "vscode-qq",
   "displayName": "QQ · Native Chat",
   "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "publisher": "rynxis",
   "license": "MIT",
   "engines": {
@@ -216,6 +216,16 @@
         "command": "qq.insertMessageImage",
         "title": "QQ: 图片引用到发送栏",
         "icon": "$(insert)"
+      },
+      {
+        "command": "qq.mentionMember",
+        "title": "QQ: @群成员",
+        "icon": "$(mention)"
+      },
+      {
+        "command": "qq.mentionSender",
+        "title": "QQ: @这位发送者",
+        "icon": "$(mention)"
       }
     ],
     "menus": {
@@ -313,6 +323,11 @@
         {
           "command": "qq.cancelReply",
           "when": "resourceScheme == qqchat"
+        },
+        {
+          "command": "qq.mentionMember",
+          "when": "resourceScheme == qqchat && resourcePath =~ /^\\/group\\//",
+          "group": "navigation@8"
         }
       ],
       "editor/context": [
@@ -330,6 +345,11 @@
           "command": "qq.insertMessageImage",
           "when": "resourceScheme == qqchat",
           "group": "qq@3"
+        },
+        {
+          "command": "qq.mentionSender",
+          "when": "resourceScheme == qqchat && resourcePath =~ /^\\/group\\//",
+          "group": "qq@2"
         }
       ],
       "commandPalette": [
@@ -410,8 +430,26 @@
       "properties": {
         "qq.codeLanguage": {
           "type": "string",
-          "enum": ["c", "python", "javascript", "typescript", "dart", "kotlin", "java", "swift"],
-          "enumItemLabels": ["C", "Python", "JavaScript", "TypeScript", "Dart", "Kotlin", "Java", "Swift"],
+          "enum": [
+            "c",
+            "python",
+            "javascript",
+            "typescript",
+            "dart",
+            "kotlin",
+            "java",
+            "swift"
+          ],
+          "enumItemLabels": [
+            "C",
+            "Python",
+            "JavaScript",
+            "TypeScript",
+            "Dart",
+            "Kotlin",
+            "Java",
+            "Swift"
+          ],
           "default": "c",
           "scope": "application",
           "description": "聊天记录的代码语言显示风格。保存后立即刷新，保留草稿和消息原文。"

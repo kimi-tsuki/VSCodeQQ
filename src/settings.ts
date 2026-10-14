@@ -28,6 +28,7 @@ export class ConnectionSettings implements vscode.Disposable {
       <label class="check"><input id="clearToken" type="checkbox">清除已保存的 Token</label>
       <label class="check"><input id="autoConnect" type="checkbox">打开 QQ 视图时自动连接</label>
       <hr><h2>聊天与提醒</h2>
+      <label for="codeLanguage">代码语言风格</label><select id="codeLanguage" aria-describedby="codeLanguageHelp">${codeLanguages.map((value, i) => `<option value="${value}">${['C（默认）', 'Python', 'JavaScript', 'TypeScript', 'Dart', 'Kotlin', 'Java', 'Swift'][i]}</option>`).join('')}</select><p class="help" id="codeLanguageHelp">仅改变聊天记录的代码显示风格；保存后立即生效，草稿和消息原文保持不变。</p>
       <label for="historyCount">首次加载历史条数</label><input id="historyCount" type="number" min="10" max="500" required>
       <label for="messageLimit">每个会话历史上限（未完成发送单独保留）</label><input id="messageLimit" type="number" min="50" max="2000" required>
       <label for="notifications">弹窗提醒</label><select id="notifications"><option value="all">允许提醒的所有新消息</option><option value="mentions">仅 @我和回复我</option><option value="off">关闭弹窗（保留未读与高亮）</option></select>
@@ -35,7 +36,6 @@ export class ConnectionSettings implements vscode.Disposable {
       <label for="replyColor">回复我高亮颜色</label><input id="replyColor" type="color"><p class="help">使用淡色背景和左侧色条，同时 @我和回复我时优先显示 @我颜色。</p>
       <h2>附件缓存</h2><label for="cacheRetentionDays">无引用附件保留天数</label><input id="cacheRetentionDays" type="number" min="1" max="90" required>
       <p id="cacheInfo" class="help"></p><button type="button" id="cleanCache" class="secondary">清理无用附件缓存</button><p class="help">保护草稿、撤销记录、发送队列和历史图片；最近一小时导入的附件暂不清理。</p>
-      <label for="codeLanguage">代码语言风格</label><select id="codeLanguage" aria-describedby="codeLanguageHelp">${codeLanguages.map((value, i) => `<option value="${value}">${['C（默认）', 'Python', 'JavaScript', 'TypeScript', 'Dart', 'Kotlin', 'Java', 'Swift'][i]}</option>`).join('')}</select><p class="help" id="codeLanguageHelp">仅改变聊天记录的代码显示风格；保存后立即生效，草稿和消息原文保持不变。</p>
       <div class="actions"><button type="submit" id="connect">保存并连接</button><button type="button" id="save" class="secondary">仅保存</button><button type="button" id="test" class="secondary">测试连接</button></div>
       <div class="import"><button type="button" id="import" class="secondary">导入 tuiqq 配置</button><span class="help">选择现有的 config.json。</span></div>
       </fieldset></form><p id="result" role="status" aria-live="polite">正在读取设置…</p>

@@ -24,6 +24,7 @@ export class MockNapCat {
   sent: any[] = [];
   sentMessages = new Map<number, any>();
   loginFailures = 0;
+  memberFailures = 0;
   historyExtra: any[] = [];
   sendDelay = 0;
   detailDelay = 0;
@@ -54,7 +55,7 @@ export class MockNapCat {
         case 'get_friend_list': respond([{ user_id: 10001, nickname: '张三', remark: '测试好友' }]); break;
         case 'get_group_list': respond([{ group_id: 20001, group_name: '原生界面验证群' }, { group_id: 20002, group_name: '另一个会话' }]); break;
         case 'get_group_detail_info': respond({ cmdUinMsgMask: this.masks.get(String(req.params.group_id)) }); break;
-        case 'get_group_member_list': respond([{ user_id: 10001, card: '群名片', nickname: '张三', role: 'admin', title: '调试员' }, { user_id: 123456, card: '我的名片', role: 'member' }]); break;
+        case 'get_group_member_list': if (this.memberFailures-- > 0) { respond(null, 'failed'); break; } respond([{ user_id: 10001, card: '群名片', nickname: '张三', role: 'admin', title: '调试员' }, { user_id: 123456, card: '我的名片', role: 'member' }]); break;
         case 'get_group_msg_history': case 'get_friend_msg_history': {
           if (this.historyDelay) await new Promise(resolve => setTimeout(resolve, this.historyDelay));
           respond({ messages: [...this.history(), ...this.historyExtra] }); break;

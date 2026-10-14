@@ -531,7 +531,13 @@ export async function run(): Promise<void> {
     app.filterList('list', '张三');
     assert.ok(app.trees.find(t => t.section === 'list')!.getChildren().some(c => c.key === 'private:10001'));
     app.filterList('list', '');
+    app.store!.members.delete('group:20002'); backend.memberFailures = 1;
     await app.loadMembers('group:20002');
+    assert.equal(app.store!.members.has('group:20002'), false);
+    const memberCalls = backend.calls.filter(c => c.action === 'get_group_member_list').length;
+    await Promise.all([app.loadMembers('group:20002'), app.loadMembers('group:20002')]);
+    assert.equal(backend.calls.filter(c => c.action === 'get_group_member_list').length, memberCalls + 1);
+    assert.ok(app.store!.members.get('group:20002')?.has('10001'));
     app.store!.setDraft('group:20002', '@'); await app.native.sync(editor, false);
     const atEnd = editor.document.positionAt(editor.document.getText().length);
     const members = await vscode.commands.executeCommand<vscode.CompletionList>('vscode.executeCompletionItemProvider', editor.document.uri, atEnd, '@');
@@ -539,6 +545,37 @@ export async function run(): Promise<void> {
     await app.sendMessage('group:20002', '@[10001] 测试提及');
     assert.ok(backend.sent.at(-1).message.some((s: any) => s.type === 'at' && s.data.qq === '10001'));
     checks.push('/图片、/文件、成员补全实际发送 at 段，备注昵称联合搜索');
+    // Exercise the real editor suggestion acceptance, including a Chinese prefix.
+    await until(() => !app!.native.isUpdating(editor.document));
+    app.store!.setDraft('group:20002', '你好', '1000', []);
+    await app.native.sync(editor, true); await app.native.focus(editor);
+    const beforeAt = backend.sent.length;
+    await vscode.commands.executeCommand('default:type', { text: '@' });
+    await vscode.commands.executeCommand('default:type', { text: '张' });
+    await vscode.commands.executeCommand('editor.action.triggerSuggest');
+    await ui.waitFor(`!!document.querySelector('.suggest-widget.visible')`);
+    await new Promise(r => setTimeout(r, 200));
+    await ui.enter();
+    await until(() => app!.native.draft(editor.document) === '你好@[10001] ');
+    assert.equal(backend.sent.length, beforeAt, 'Enter 选择群成员不能发送消息');
+    assert.equal(app.store!.draft('group:20002').replyId, '1000');
+    const senderLine = app.transcript!.rendered.get('group:20002')!.starts.get('77802')!;
+    editor.selection = new vscode.Selection(senderLine, 0, senderLine, 0);
+    await vscode.commands.executeCommand('qq.mentionSender');
+    assert.equal(app.native.draft(editor.document), '你好@[10001] @[10001] ');
+    assert.equal(app.store!.draft('group:20002').replyId, '1000');
+    assert.equal(backend.sent.length, beforeAt);
+    const picking = vscode.commands.executeCommand('qq.mentionMember');
+    await ui.waitFor(`!!document.querySelector('.quick-input-widget input') && document.querySelector('.quick-input-widget').getBoundingClientRect().height > 0`);
+    await new Promise(r => setTimeout(r, 200));
+    await ui.enter(); await picking;
+    assert.equal((app.native.draft(editor.document).match(/@\[\d+\]/g) ?? []).length, 3);
+    assert.equal(backend.sent.length, beforeAt);
+    await app.sendMessage('group:20002', app.native.draft(editor.document));
+    assert.equal(backend.sent.at(-1).message.filter((s: any) => s.type === 'at').length, 3);
+    assert.ok(completions.items.some(item => item.label === '/艾特'));
+    checks.push('@ 中文紧邻输入、昵称筛选、Enter 只确认、右键发送者、成员选择器、草稿回复保留与真实 at 消息段');
+
 
     backend.sentMessages.set(77701, { message_id: 77701, sender: { user_id: 123456 }, message: '已不在缓存中的原文' });
     backend.emit({ ...backend.message(77702), group_id: 20002, message: [{ type: 'reply', data: { id: 77701 } }, { type: 'text', data: { text: '回复测试' } }] });
