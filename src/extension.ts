@@ -69,6 +69,23 @@ export class QQApp implements vscode.Disposable {
     this.disposables.push(this.output, this.status, this.imageDecoration, this.ownDecoration, this.newMessagesStatus);
     this.disposables.push(this.native, vscode.workspace.registerFileSystemProvider('qqchat', this.native, { isCaseSensitive: true }));
     const selector = { scheme: 'qqchat', language: 'qq-chat' };
+    this.disposables.push(vscode.languages.registerCompletionItemProvider(selector, {
+      provideCompletionItems: (doc, position) => {
+        const region = this.native.region(doc);
+        if (!region || doc.offsetAt(position) < region.start) return [];
+        const before = doc.lineAt(position.line).text.slice(0, position.character);
+        const match = /(?:^|\s)(\/[\w\u4e00-\u9fff]*)$/.exec(before);
+        if (!match) return [];
+        const range = new vscode.Range(position.translate(0, -match[1].length), position);
+        return ['/表情', '/emoji'].map((label, i) => {
+          const item = new vscode.CompletionItem(label, vscode.CompletionItemKind.Function);
+          item.detail = '打开底部表情选择器 · 方向键选择 · Enter 插入 · Esc 返回';
+          item.range = range; item.insertText = ''; item.sortText = String(i);
+          item.command = { command: 'qq.emojis', title: '选择表情' };
+          return item;
+        });
+      }
+    }, '/'));
     this.disposables.push(vscode.languages.registerDocumentLinkProvider(selector, {
       provideDocumentLinks: doc => [...(this.native.historyMatches(doc) ? this.transcript?.provideDocumentLinks(doc) ?? [] : []), ...this.native.links(doc)]
     }), vscode.languages.registerHoverProvider(selector, {

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ChatStore } from './store';
@@ -7,6 +7,8 @@ import { Attachment, inline, messageText } from './model';
 import { AttachmentFiles, basicFaces } from './attachments';
 import { OneBotClient } from './onebot';
 import { Transcript } from './transcript';
+import { imageExtension } from './media';
+import { RecentEmoji, rememberEmoji } from './recentEmojis';
 
 export interface ComposerHost {
   store?: ChatStore; target?: string; ready: boolean;
@@ -19,13 +21,16 @@ export interface ComposerHost {
 export class Composer implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private edits = new Map<string, number>();
-  private favoriteSources = new Map<string, { url: string; account: string }>();
+  private favoriteSources = new Map<string, { url?: string; file?: string; account: string }>();
   private favoriteRequest = 0;
+  private choosing = false;
   focused = false;
   private wantEmojis = false;
+  private webviewReady = false;
   constructor(private context: vscode.ExtensionContext, private host: ComposerHost) {}
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    this.webviewReady = false;
     this.edits.clear(); this.favoriteSources.clear();
     const webview = view.webview;
     const media = vscode.Uri.joinPath(this.context.extensionUri, 'media');
@@ -33,14 +38,15 @@ export class Composer implements vscode.WebviewViewProvider {
     const nonce = randomBytes(24).toString('hex');
     const script = webview.asWebviewUri(vscode.Uri.joinPath(media, 'composer.js'));
     const style = webview.asWebviewUri(vscode.Uri.joinPath(media, 'composer.css'));
-    webview.html = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"><link rel="stylesheet" href="${style}"></head><body><header><span id="target">从左侧选择会话</span><span id="status"></span></header><div id="reply" hidden><span id="replyText"></span><button id="cancel" title="取消回复">×</button></div><p>在聊天文档底部输入，Enter 发送，Shift/Ctrl+Enter 换行。图片和表情会插入光标处。</p><textarea hidden id="input" aria-label="QQ 消息" placeholder="输入消息或粘贴图片，Enter 发送" maxlength="65536" spellcheck="false" disabled></textarea><div id="attachments" aria-label="待发送附件"></div><footer><div class="tools"><button id="addImage" disabled>图片</button><button id="emojis" disabled>表情</button><span id="hint">Enter 发送</span></div><button id="send" disabled>发送</button></footer><section id="emojiPanel" hidden><div class="emojiHeading">QQ 常用表情 <span>图标为示意，发送 QQ 原生表情</span></div><div id="basicFaces" class="basicGrid"></div><div class="emojiHeading">收藏表情 <button id="reloadFaces">刷新</button></div><div id="favoriteStatus"></div><div id="favoriteFaces" class="faceGrid"></div><button id="moreFaces" hidden>加载更多</button></section><div id="error" role="status"></div><script nonce="${nonce}" src="${script}"></script></body></html>`;
+    webview.html = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"><link rel="stylesheet" href="${style}"></head><body><section id="emojiPanel"><nav role="tablist" aria-label="表情分类"><button id="tabFavorites" role="tab" aria-selected="true" aria-controls="favoriteFaces">收藏表情</button><button id="tabRecent" role="tab" aria-selected="false" aria-controls="recentFaces">最近使用</button><button id="tabBasic" role="tab" aria-selected="false" aria-controls="basicFaces">QQ 表情</button><span class="spacer"></span><button id="reloadFaces" title="刷新收藏表情" aria-label="刷新收藏表情">↻</button><button id="closeEmojis" title="关闭 Esc" aria-label="关闭表情">×</button></nav><div id="favoriteStatus" role="status" hidden></div><div id="favoriteFaces" class="faceGrid" role="tabpanel" aria-label="收藏表情"></div><div id="recentFaces" class="faceGrid" role="tabpanel" aria-label="最近使用" hidden></div><div id="basicFaces" class="faceGrid basicGrid" role="tabpanel" aria-label="QQ 表情" hidden></div><button id="moreFaces" hidden>加载更多</button><div id="error" role="status" hidden></div></section><script nonce="${nonce}" src="${script}"></script></body></html>`;
     view.onDidDispose(() => { if (this.view === view) { this.view = undefined; this.focused = false; } });
     webview.onDidReceiveMessage(data => { void this.handleMessage(data).catch((error: Error) => this.post({ type: 'error', account: data?.account, key: data?.key, message: error.message })); });
   }
   private post(data: unknown): void { void this.view?.webview.postMessage(data); }
   async handleMessage(data: any): Promise<void> {
-    if (data?.type === 'ready') { this.update(); if (this.wantEmojis) { this.post({ type: 'showEmojis' }); this.wantEmojis = false; } return; }
+    if (data?.type === 'ready') { this.webviewReady = true; this.update(); if (this.wantEmojis) { this.post({ type: 'showEmojis' }); this.wantEmojis = false; } return; }
     if (data?.type === 'focus') { this.focused = !!data.value; this.host.checkRead(); return; }
+    if (data?.type === 'closeEmojis') { await this.close(); return; }
     const store = this.host.store, files = this.host.attachments;
     if (!store || data?.account !== store.selfId || typeof data.key !== 'string' || !store.chats.has(data.key)) return;
     const key: string = data.key;
@@ -74,15 +80,19 @@ export class Composer implements vscode.WebviewViewProvider {
       store.removeAttachment(key, data.id); this.update();
     } else if (data.type === 'basicFace') {
       const face = basicFaces.find(face => face.id === data.id); if (!face) return;
-      await this.host.attachToDraft(key, [{ id: randomUUID(), kind: 'face', label: face.name, faceId: face.id }]); this.update();
+      if (this.choosing) return;
+      this.choosing = true;
+      try { await this.host.attachToDraft(key, [{ id: randomUUID(), kind: 'face', label: face.name, faceId: face.id }]); await this.remember(store.selfId, { id: `face:${face.id}`, kind: 'face', label: face.name, faceId: face.id }); await this.close(); }
+      finally { this.choosing = false; }
     } else if (data.type === 'faces') {
       const request = ++this.favoriteRequest;
       const count = Math.min(500, Math.max(48, Number(data.count) || 48));
       this.post({ type: 'basicFaces', account: store.selfId, key, faces: basicFaces });
+      this.favoriteSources.clear();
+      this.postRecent(store.selfId, key);
       if (!this.host.ready) throw new Error('连接 NapCat 后可读取收藏表情');
       const faces = await this.host.client.call('fetch_custom_face', { count });
       if (store !== this.host.store || request !== this.favoriteRequest) return;
-      this.favoriteSources.clear();
       const entries = (Array.isArray(faces) ? faces : []).filter((u: unknown): u is string => typeof u === 'string' && /^https?:\/\//i.test(u)).slice(0, count).map((url: string, i: number) => {
         const id = randomUUID(); this.favoriteSources.set(id, { url, account: store.selfId }); return { id, label: `收藏表情 ${i + 1}` };
       });
@@ -90,15 +100,57 @@ export class Composer implements vscode.WebviewViewProvider {
     } else if (data.type === 'favoritePreview' || data.type === 'favoriteFace') {
       const source = this.favoriteSources.get(data.id);
       if (!source || source.account !== store.selfId || !this.host.transcript || !files) return;
-      const file = await this.host.transcript.media.get({ file: '', url: source.url });
+      if (data.type === 'favoriteFace' && this.choosing) return;
+      if (data.type === 'favoriteFace') this.choosing = true;
+      try {
+      const file = source.file ?? await this.host.transcript.media.get({ file: '', url: source.url });
       if (store !== this.host.store) return;
-      if (data.type === 'favoritePreview') this.post({ type: 'favoritePreview', account: store.selfId, key, id: data.id, src: this.view?.webview.asWebviewUri(vscode.Uri.file(file)).toString() });
+      if (data.type === 'favoritePreview') {
+        const bytes = await fs.readFile(file);
+        const mime: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' };
+        const ext = imageExtension(bytes); if (!ext || bytes.length > 16 * 1024 * 1024) throw new Error('表情图片格式或大小不受支持');
+        this.post({ type: 'favoritePreview', account: store.selfId, key, id: data.id, src: `data:${mime[ext]};base64,${bytes.toString('base64')}` });
+      }
       else {
         const attachment = await files.stage(await fs.readFile(file), '收藏表情', true);
         if (store !== this.host.store) return;
-        await this.host.attachToDraft(key, [attachment]); this.update();
+        await this.host.attachToDraft(key, [attachment]);
+        const bytes = await fs.readFile(file), ext = imageExtension(bytes)!;
+        const hash = createHash('sha256').update(bytes).digest('hex');
+        const folder = this.recentFolder(store.selfId); await fs.mkdir(folder, { recursive: true });
+        await fs.writeFile(path.join(folder, hash + ext), bytes);
+        await this.remember(store.selfId, { id: hash, kind: 'image', label: '收藏表情', file: hash + ext });
+        await this.close();
       }
+      } catch (error: any) {
+        if (data.type === 'favoritePreview') this.post({ type: 'favoritePreviewError', account: store.selfId, key, id: data.id, message: error.message });
+        else throw error;
+      } finally { if (data.type === 'favoriteFace') this.choosing = false; }
     }
+  }
+  private recentFolder(account: string): string { return path.join(this.context.globalStorageUri.fsPath, 'accounts', account, 'recent-emojis'); }
+  private recent(account: string): RecentEmoji[] { return this.context.globalState.get<RecentEmoji[]>(`recentEmojis.${account}`, []).slice(0, 10); }
+  private async remember(account: string, item: RecentEmoji): Promise<void> {
+    const previous = this.recent(account), next = rememberEmoji(previous, item);
+    await this.context.globalState.update(`recentEmojis.${account}`, next);
+    for (const old of previous) if (old.file && path.basename(old.file) === old.file && !next.some(e => e.file === old.file)) await fs.unlink(path.join(this.recentFolder(account), old.file)).catch(() => {});
+  }
+  private postRecent(account: string, key: string): void {
+    const entries = this.recent(account).flatMap<{ id: string; label: string; faceId?: string; icon?: string }>(item => {
+      if (item.kind === 'face') {
+        const face = basicFaces.find(face => face.id === item.faceId);
+        return face ? [{ id: item.id, label: face.name, faceId: face.id, icon: face.icon }] : [];
+      }
+      if (!item.file || path.basename(item.file) !== item.file) return [];
+      const id = `recent:${item.id}`;
+      this.favoriteSources.set(id, { account, file: path.join(this.recentFolder(account), item.file) });
+      return [{ id, label: item.label }];
+    });
+    this.post({ type: 'recentFaces', account, key, entries });
+  }
+  private async close(): Promise<void> {
+    if (this.view?.visible) await vscode.commands.executeCommand('workbench.action.closePanel');
+    await this.host.focusInput();
   }
   update(): void {
     if (!this.view) return;
@@ -118,6 +170,7 @@ export class Composer implements vscode.WebviewViewProvider {
   async showEmojis(): Promise<void> {
     this.wantEmojis = true;
     await vscode.commands.executeCommand('qq.composer.focus');
-    this.view?.show(false); this.update(); this.post({ type: 'showEmojis' });
+    this.view?.show(false); this.update();
+    if (this.webviewReady && this.wantEmojis) { this.wantEmojis = false; this.post({ type: 'showEmojis' }); }
   }
 }

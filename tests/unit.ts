@@ -223,3 +223,12 @@ test('发送完成只移除已经发送的附件，保留新草稿与新附件',
     assert.deepEqual(store.draft('group:1').attachments.map(a => a.id), ['second']);
   } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
 });
+
+test('最近表情按使用顺序去重，最多保留十个', async () => {
+  const { rememberEmoji } = await import('../src/recentEmojis');
+  let items: import('../src/recentEmojis').RecentEmoji[] = [];
+  for (let i = 0; i < 12; i++) items = rememberEmoji(items, { id: String(i), kind: 'face', label: String(i), faceId: String(i) });
+  assert.deepEqual(items.map(e => e.id), ['11','10','9','8','7','6','5','4','3','2']);
+  items = rememberEmoji(items, { id: '5', kind: 'face', label: 'five', faceId: '5' });
+  assert.equal(items.length, 10); assert.equal(items[0].id, '5'); assert.equal(items.filter(e => e.id === '5').length, 1);
+});

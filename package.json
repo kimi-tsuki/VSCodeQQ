@@ -2,7 +2,7 @@
   "name": "vscode-qq",
   "displayName": "QQ · Native Chat",
   "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "publisher": "rynxis",
   "license": "MIT",
   "engines": {
@@ -38,7 +38,7 @@
       "panel": [
         {
           "id": "qq-input-panel",
-          "title": "QQ 表情与附件",
+          "title": "QQ 表情",
           "icon": "media/qq.svg"
         }
       ]
@@ -57,7 +57,7 @@
       "qq-input-panel": [
         {
           "id": "qq.composer",
-          "name": "QQ 表情与附件",
+          "name": "QQ 表情",
           "type": "webview"
         }
       ]
@@ -338,7 +338,7 @@
       {
         "command": "qq.send",
         "key": "enter",
-        "when": "editorTextFocus && resourceScheme == qqchat && qq.inDraft && !isComposing"
+        "when": "editorTextFocus && resourceScheme == qqchat && qq.inDraft && !isComposing && !suggestWidgetVisible"
       },
       {
         "command": "qq.newline",
@@ -382,7 +382,8 @@
         "editor.renderWhitespace": "none",
         "editor.quickSuggestions": false,
         "editor.unicodeHighlight.ambiguousCharacters": false,
-        "editor.unicodeHighlight.nonBasicASCII": false
+        "editor.unicodeHighlight.nonBasicASCII": false,
+        "editor.acceptSuggestionOnEnter": "on"
       }
     },
     "configuration": {

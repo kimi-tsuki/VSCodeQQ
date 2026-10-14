@@ -20,17 +20,45 @@ export class TestUI {
     await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
     return new TestUI(socket);
   }
-  call(method: string, params: unknown = {}): Promise<any> {
+  call(method: string, params: unknown = {}, sessionId?: string): Promise<any> {
     const id = ++this.serial;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`UI 验证超时：${method}`)); }, 10000);
-      this.pending.set(id, { resolve, reject, timer }); this.socket.send(JSON.stringify({ id, method, params }));
+      this.pending.set(id, { resolve, reject, timer }); this.socket.send(JSON.stringify({ id, method, params, sessionId }));
     });
   }
   async evaluate(expression: string): Promise<any> {
     const result = await this.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
     if (result.exceptionDetails) throw new Error('测试窗口 DOM 检查失败');
     return result.result.value;
+  }
+  async webview(): Promise<{ evaluate: (expression: string) => Promise<any>; key: (key: string, code: number) => Promise<void> }> {
+    const sessions = new Map<string, string>();
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const { targetInfos } = await this.call('Target.getTargets');
+      for (const target of targetInfos.filter((t: any) => t.type === 'iframe')) {
+        try {
+          let session = sessions.get(target.targetId);
+          if (!session) { session = (await this.call('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId; sessions.set(target.targetId, session!); }
+          const tree = await this.call('Page.getFrameTree', {}, session);
+          const frames = (node: any): any[] => [node.frame, ...(node.childFrames ?? []).flatMap(frames)];
+          for (const frame of frames(tree.frameTree)) {
+            const world = await this.call('Page.createIsolatedWorld', { frameId: frame.id, worldName: 'qq-test' }, session);
+            const evaluate = async (expression: string) => {
+              const result = await this.call('Runtime.evaluate', { expression, contextId: world.executionContextId, returnByValue: true, awaitPromise: true }, session);
+              if (result.exceptionDetails) throw new Error('表情 Webview DOM 检查失败');
+              return result.result.value;
+            };
+            if (await evaluate(`!!document.getElementById('favoriteFaces')`)) return { evaluate, key: async (key, code) => {
+              await this.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: code }, session);
+              await this.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code }, session);
+            } };
+          }
+        } catch { /* The inner frame can still be loading. */ }
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+    throw new Error('未找到表情 Webview 的 DOM');
   }
   async enter(modifiers = 0): Promise<void> {
     await this.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, modifiers });
