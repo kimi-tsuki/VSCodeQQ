@@ -57,7 +57,7 @@
 也可以在能使用 `code` 命令的终端里安装：
 
 ```sh
-code --install-extension ./artifacts/vscode-qq-0.1.15.vsix --force
+code --install-extension ./artifacts/vscode-qq-0.1.16.vsix --force
 ```
 
 没有安装包时，安装 Node.js 22 或更高版本及 Git，在终端执行：
@@ -150,6 +150,8 @@ void send_reply_123456(void) {  // 我
 ```
 
 `INFO` 的三项分别是**群头衔、显示名称、时间**；管理员 / 群主标签放在函数行，备注和昵称按需单独显示。引号、反斜杠、换行只在展示时进行转义，复制原文和发送使用实际消息内容。
+
+左侧“列表 / 收藏”下方还有独立的 **设置** 区，可直接连接/断开 NapCat、选择代码风格、切换自动连接，或打开完整设置页。
 
 ### 代码语言风格
 

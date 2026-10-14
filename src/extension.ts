@@ -9,6 +9,8 @@ import { Transcript } from './transcript';
 import { ChatTree, Section } from './tree';
 import { Composer } from './composer';
 import { Configuration } from './configuration';
+import { SettingsTree } from './settingsTree';
+import { codeLanguages } from './codeStyle';
 import { ConnectionSettings } from './settings';
 import { AttachmentFiles } from './attachments';
 import { downloadFile } from './download';
@@ -47,6 +49,7 @@ export class QQApp implements vscode.Disposable {
   private cleaningCache?: Promise<number>;
   private replyLookups = new Map<string, Promise<boolean>>();
   private cancelled = new Set<string>();
+  readonly settingsTree = new SettingsTree(() => this.client.connected);
   private memberLoaded = new Map<string, number>();
   private memberLoading = new Map<string, Promise<void>>();
   private following = new Map<vscode.TextEditor, boolean>();
@@ -71,6 +74,7 @@ export class QQApp implements vscode.Disposable {
     this.refreshHighlights();
     this.disposables.push(vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('qq')) {
+        this.settingsTree.refresh();
         this.refreshHighlights();
         if (this.store) this.store.limit = this.config.messageLimit;
         for (const editor of vscode.window.visibleTextEditors) this.decorate(editor);
@@ -142,6 +146,7 @@ export class QQApp implements vscode.Disposable {
         view.message = provider.filter ? `搜索：${provider.filter} · ${provider.getChildren().length} 个结果` : undefined;
       }));
     }
+    this.disposables.push(this.settingsTree, vscode.window.createTreeView('qq.settings', { treeDataProvider: this.settingsTree, showCollapseAll: false }));
     this.commands();
     this.disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration('qq.codeLanguage')) {
@@ -689,6 +694,17 @@ export class QQApp implements vscode.Disposable {
     register('qq.connect', () => this.connect());
     register('qq.disconnect', () => this.client.disconnect());
     register('qq.configure', () => this.settings.open());
+    register('qq.chooseCodeLanguage', async () => {
+      const labels = ['C', 'Python', 'JavaScript', 'TypeScript', 'Dart', 'Kotlin', 'Java', 'Swift'];
+      const selected = await vscode.window.showQuickPick(codeLanguages.map((value, i) => ({
+        label: labels[i], description: value === this.config.codeLanguage ? '当前风格' : '', value
+      })), { title: 'QQ 代码风格', placeHolder: '选择后立即应用，保留当前草稿' });
+      if (selected) await vscode.workspace.getConfiguration('qq').update('codeLanguage', selected.value, vscode.ConfigurationTarget.Global);
+    });
+    register('qq.toggleAutoConnect', async () => {
+      const config = vscode.workspace.getConfiguration('qq');
+      await config.update('autoConnect', !config.get('autoConnect', true), vscode.ConfigurationTarget.Global);
+    });
     for (const page of ['list', 'favorites'] as Section[]) register(`qq.show.${page}`, async () => {
       await vscode.commands.executeCommand(`qq.${page}.focus`);
     });
@@ -904,6 +920,7 @@ export class QQApp implements vscode.Disposable {
     input.show();
   }
   private updateStatus(text: string): void {
+    this.settingsTree.status = text; this.settingsTree.refresh();
     this.status.text = `$(${this.ready ? 'comment-discussion' : 'debug-disconnect'}) QQ · ${text}`;
     this.status.tooltip = 'NapCat / OneBot v11 · 点击重新连接'; this.composer.update();
   }
