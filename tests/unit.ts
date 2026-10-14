@@ -58,6 +58,25 @@ test('INFO、引用字段与操作位置分离，正文中的伪按钮不会成�
   }
 });
 
+test('回复图片保留原消息索引，长文字截断不吞掉后续图片', () => {
+  const original = parseMessage({ message_id: 10, user_id: 123, message: [
+    { type: 'text', data: { text: '长'.repeat(180) } },
+    { type: 'image', data: { file: 'one.png' } },
+    { type: 'text', data: { text: '尾部' } },
+    { type: 'image', data: { file: 'two.png' } }
+  ] }, 'group:1', '123');
+  const reply = parseMessage({ message_id: 11, user_id: 456, message: [
+    { type: 'reply', data: { id: 10 } }, { type: 'text', data: { text: '回复' } }
+  ] }, 'group:1', '123');
+  const view = renderTranscript(newChat('group', 1, '测试'), [original, reply], '123');
+  const lines = view.text.split('\n');
+  const spans = view.images.filter(s => lines[s.line].includes('char replay[]'));
+  assert.equal(spans.length, 2);
+  assert.deepEqual(spans.map(s => [s.messageId, s.imageIndex]), [['10', 0], ['10', 1]]);
+  for (const span of spans) assert.equal(lines[span.line].slice(span.start, span.end), '[图片]');
+  assert.ok(lines[spans[0].line].includes('…[图片][图片]'));
+});
+
 test('悬浮图片限制宽高、保持比例、小图不放大', () => {
   const dimensions = (w: number, h: number) => { const bytes = Buffer.from(png); bytes.writeUInt32BE(w, 16); bytes.writeUInt32BE(h, 20); return previewDimensions(bytes); };
   assert.deepEqual(dimensions(4000, 1000), { width: 240, height: 60 });

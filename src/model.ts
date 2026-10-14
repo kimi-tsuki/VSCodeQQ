@@ -164,7 +164,22 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
     const fn = self ? (m.replyId ? 'send_reply' : 'send') : (m.replyId ? 'reply' : 'recv');
     lines.push(`void ${fn}_${/^\d+$/.test(m.senderId) ? m.senderId : 'unknown'}(void) {${tags.length ? `  // ${tags.join(' · ')}` : ''}`);
     if (m.replyId) {
-      lines.push(`    char replay[] = "${codeString(target ? `${target.senderName}：${messageText(target).slice(0, 160)}` : `回复消息 ${m.replyId}（未加载）`)}";`);
+      let replay = `    char replay[] = "`;
+      if (target) {
+        replay += codeString(`${target.senderName}：`);
+        let remaining = 160, replyImageIndex = 0, truncated = false;
+        for (const part of target.segments) {
+          if (part.type === 'image') {
+            rendered.images.push({ line: lines.length, start: replay.length, end: replay.length + 4, messageId: target.id, imageIndex: replyImageIndex++ });
+            replay += '[图片]';
+          } else {
+            replay += codeString(part.text.slice(0, remaining));
+            if (part.text.length > remaining && !truncated) { replay += '…'; truncated = true; }
+            remaining = Math.max(0, remaining - part.text.length);
+          }
+        }
+      } else replay += codeString(`回复消息 ${m.replyId}（未加载）`);
+      lines.push(replay + '";');
     }
     let current = '    char msg[] = "';
     let imageIndex = 0, fileIndex = 0;

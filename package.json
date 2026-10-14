@@ -2,7 +2,7 @@
   "name": "vscode-qq",
   "displayName": "QQ · Native Chat",
   "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "rynxis",
   "license": "MIT",
   "engines": {
@@ -211,6 +211,11 @@
         "command": "qq.insertFile",
         "title": "QQ: 插入文件",
         "icon": "$(file)"
+      },
+      {
+        "command": "qq.insertMessageImage",
+        "title": "QQ: 图片引用到发送栏",
+        "icon": "$(insert)"
       }
     ],
     "menus": {
@@ -320,6 +325,11 @@
           "command": "qq.copyMessage",
           "when": "resourceScheme == qqchat",
           "group": "qq@2"
+        },
+        {
+          "command": "qq.insertMessageImage",
+          "when": "resourceScheme == qqchat",
+          "group": "qq@3"
         }
       ],
       "commandPalette": [

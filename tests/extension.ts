@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { QQApp } from '../src/extension';
-import { MockNapCat, png, until } from './fixture';
+import { MockNapCat, png, tallPng, widePng, until } from './fixture';
 import { DRAFT_DIVIDER } from '../src/nativeEditor';
 import { TestUI } from './ui';
 import { allowsUnread } from '../src/notifications';
@@ -365,8 +365,62 @@ export async function run(): Promise<void> {
     assert.equal(backend.fileUploads.at(-1).action, 'upload_private_file');
     assert.equal(backend.fileUploads.at(-1).user_id, '10001');
     checks.push('真实 Shift 文件拖入、文件悬浮、分片进度在消息后、立即清空草稿、独立失败重试与群/私聊上传');
+    backend.emit({ ...backend.message(77801), group_id: 20002, message: [
+      { type: 'image', data: { file: 'reuse-tall.png', url: backend.imageUrl + '?tall' } },
+      { type: 'image', data: { file: 'reuse-wide.png', url: backend.imageUrl + '?wide' } }
+    ] });
+    await until(() => app!.transcript!.rendered.get('group:20002')?.images.filter(s => s.messageId === '77801').length === 2);
+    await until(() => !app!.native.isUpdating(editor.document) && app!.native.historyMatches(editor.document));
+    app.store!.setDraft('group:20002', '前后', '1000', []); await app.native.sync(editor, true);
+    await until(() => app!.native.draft(editor.document) === '前后' && !app!.native.isUpdating(editor.document));
+    const insertion = editor.document.positionAt(app.native.region(editor.document)!.start + 1);
+    editor.selection = new vscode.Selection(insertion, insertion);
+    const secondImage = app.transcript!.rendered.get('group:20002')!.images.find(s => s.messageId === '77801' && s.imageIndex === 1)!;
+    const imageHover = await app.transcript!.provideHover(editor.document, new vscode.Position(secondImage.line, secondImage.start + 1), new vscode.CancellationTokenSource().token);
+    const actions = imageHover!.contents.map(c => typeof c === 'string' ? c : 'value' in c ? c.value : '').join('');
+    assert.ok(actions.includes('引用到发送栏') && actions.includes('command:qq.insertMessageImage'));
+    const beforeReuse = backend.sent.length;
+    await vscode.commands.executeCommand('qq.insertMessageImage', editor.document.uri.toString(), '77801', 1);
+    assert.match(app.native.draft(editor.document), /^前\[图片:\d+\]后$/);
+    assert.equal(app.store!.draft('group:20002').replyId, '1000');
+    assert.deepEqual(await app.attachments!.read(app.store!.draft('group:20002').attachments.at(-1)!), widePng);
+    backend.emit({ ...backend.message(77802), group_id: 20002, message: [
+      { type: 'reply', data: { id: '77801' } }, { type: 'text', data: { text: '引用上面的图片' } }
+    ] });
+    await until(() => app!.native.historyMatches(editor.document) && !app!.native.isUpdating(editor.document) && app!.transcript!.rendered.get('group:20002')!.images.filter(s => s.messageId === '77801').length === 4);
+    const firstImage = app.transcript!.rendered.get('group:20002')!.images.filter(s => s.messageId === '77801' && s.imageIndex === 0).at(-1)!;
+    assert.ok(editor.document.lineAt(firstImage.line).text.includes('char replay[]'));
+    await new Promise(r => setTimeout(r, 300));
+    const replyHover = await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', editor.document.uri, new vscode.Position(firstImage.line, firstImage.start + 1));
+    assert.ok(replyHover?.some(h => h.contents.some(c => typeof c === 'string' ? c.includes('引用到发送栏') : 'value' in c && c.value.includes('引用到发送栏'))));
+
+    editor.selection = new vscode.Selection(firstImage.line, firstImage.start + 1, firstImage.line, firstImage.start + 1);
+    await vscode.commands.executeCommand('qq.insertMessageImage');
+    assert.equal(app.store!.draft('group:20002').attachments.length, 2);
+    assert.deepEqual(await app.attachments!.read(app.store!.draft('group:20002').attachments.at(-1)!), tallPng);
+    assert.ok(app.native.inDraft(editor));
+    assert.equal(backend.sent.length, beforeReuse);
+    await assert.rejects(async () => vscode.commands.executeCommand('qq.insertMessageImage', editor.document.uri.toString(), '77801', 99), /图片消息/);
+    const resolveImage = app.transcript!.image.bind(app.transcript);
+    let releaseImage!: () => void;
+    const waitImage = new Promise<void>(resolve => { releaseImage = resolve; });
+    app.transcript!.image = async (...args) => { await waitImage; return resolveImage(...args); };
+    const reuse = vscode.commands.executeCommand('qq.insertMessageImage', editor.document.uri.toString(), '77801', 1);
+    await vscode.commands.executeCommand('qq.insertMessageImage', editor.document.uri.toString(), '77801', 1);
+    await app.openChat('private:10001');
+    const otherDraft = app.store!.draft('private:10001');
+    releaseImage(); await reuse; app.transcript!.image = resolveImage;
+    assert.equal(app.store!.draft('group:20002').attachments.length, 3, '快速重复点击只插入一次');
+    assert.deepEqual(app.store!.draft('private:10001'), otherDraft, '异步完成不得写入另一个会话');
+    assert.equal(app.transcript!.key(vscode.window.activeTextEditor!.document.uri), 'private:10001');
+    assert.equal(backend.sent.length, beforeReuse);
+    checks.push('历史图片悬浮/右键引用到发送栏、多图定位、保留草稿与回复、去重和切换会话保护、不自动发送');
+    await app.openChat('group:20002');
+    console.log('Image reuse checks passed');
     for (const [i, shape] of ['tall', 'wide', 'tall'].entries()) {
       if (i === 2) await ui.call('Emulation.setDeviceMetricsOverride', { width: 1100, height: 480, deviceScaleFactor: 1, mobile: false });
+      await vscode.commands.executeCommand('editor.action.hideHover');
+      await new Promise(r => setTimeout(r, 300));
       const messageId = 8800 + i;
       backend.emit({ ...backend.message(messageId), group_id: 20002, message: [{ type: 'image', data: { file: `${shape}.png`, url: backend.imageUrl + `?${shape}` } }] });
       await until(() => app!.transcript!.rendered.get('group:20002')!.images.some(s => s.messageId === String(messageId)) && app!.native.historyMatches(editor.document) && !app!.native.isUpdating(editor.document));
@@ -385,7 +439,7 @@ export async function run(): Promise<void> {
       await new Promise(r => setTimeout(r, 1000));
       const debugShot = await ui.call('Page.captureScreenshot', { format: 'png' });
       await fs.writeFile(path.join(output, 'hover-debug.png'), Buffer.from(debugShot.data, 'base64'));
-      const bounds: { clipped: string[]; width: number; height: number; naturalWidth: number; naturalHeight: number } = await ui.waitFor(`(() => { const img = [...document.querySelectorAll('.monaco-hover img')].find(i => i.complete && i.naturalWidth > 1 && i.getBoundingClientRect().width > 0); if (!img) return null; const r = img.getBoundingClientRect(); let clipped = []; for (let p = img.parentElement; p; p = p.parentElement) { const css = getComputedStyle(p), b = p.getBoundingClientRect(); if (/(hidden|auto|scroll|clip)/.test(css.overflowY) && (r.top < b.top - 1 || r.bottom > b.bottom + 1)) clipped.push(p.className + ':vertical'); if (/(hidden|auto|scroll|clip)/.test(css.overflowX) && (r.left < b.left - 1 || r.right > b.right + 1)) clipped.push(p.className + ':horizontal'); if (p.classList.contains('monaco-hover')) break; } for (const [x,y] of [[r.left+1,r.top+1],[r.right-1,r.bottom-1]]) { if (document.elementFromPoint(x,y) !== img) clipped.push('image-occluded'); } return { clipped, width: r.width, height: r.height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight }; })()`);
+      const bounds: { clipped: string[]; width: number; height: number; naturalWidth: number; naturalHeight: number } = await ui.waitFor(`(() => { const img = [...document.querySelectorAll('.monaco-hover img')].find(i => i.complete && i.naturalWidth > 1 && (i.naturalHeight > i.naturalWidth) === ${shape === 'tall'} && i.getBoundingClientRect().width > 0); if (!img) return null; const r = img.getBoundingClientRect(); let clipped = []; for (let p = img.parentElement; p; p = p.parentElement) { const css = getComputedStyle(p), b = p.getBoundingClientRect(); if (/(hidden|auto|scroll|clip)/.test(css.overflowY) && (r.top < b.top - 1 || r.bottom > b.bottom + 1)) clipped.push(p.className + ':vertical'); if (/(hidden|auto|scroll|clip)/.test(css.overflowX) && (r.left < b.left - 1 || r.right > b.right + 1)) clipped.push(p.className + ':horizontal'); if (p.classList.contains('monaco-hover')) break; } for (const [x,y] of [[r.left+1,r.top+1],[r.right-1,r.bottom-1]]) { if (document.elementFromPoint(x,y) !== img) clipped.push('image-occluded'); } return { clipped, width: r.width, height: r.height, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight }; })()`);
       assert.deepEqual(bounds.clipped, [], JSON.stringify(bounds));
       assert.ok(bounds.width <= 240 && bounds.height <= 160 && bounds.width > 0 && bounds.height > 0, JSON.stringify(bounds));
       assert.ok(Math.abs(bounds.width / bounds.height - bounds.naturalWidth / bounds.naturalHeight) < 0.05);

@@ -55,6 +55,7 @@ export class QQApp implements vscode.Disposable {
   private snapshots = new Map<string, ViewSnapshot[]>();
   private historyVersions = new Map<string, number>();
   private historyCounts = new Map<string, number>();
+  private importingMessageImages = new Set<string>();
   private submitting = new Set<string>();
   private sendQueues = new Map<string, Promise<boolean>>();
   private tabChanges = new vscode.EventEmitter<vscode.Uri | undefined>();
@@ -756,6 +757,7 @@ export class QQApp implements vscode.Disposable {
       const choice = await vscode.window.showInformationMessage(`文件已保存：${safeName}`, '打开所在文件夹');
       if (choice) await vscode.commands.executeCommand('revealFileInOS', destination);
     });
+    register('qq.insertMessageImage', (uri?: string, messageId?: string, imageIndex?: number) => this.insertMessageImage(uri, messageId, imageIndex));
     register('qq.openImage', async (uri: string, messageId: string, imageIndex: number) => {
       if (!this.transcript || typeof uri !== 'string' || typeof messageId !== 'string') return;
       const file = await this.transcript.image(vscode.Uri.parse(uri), messageId, imageIndex);
@@ -768,6 +770,47 @@ export class QQApp implements vscode.Disposable {
       await this.attachments.read(attachment);
       await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(attachment.file), 'imagePreview.previewEditor', { preview: true, viewColumn: vscode.ViewColumn.Beside });
     });
+  }
+  private async insertMessageImage(uri?: string, messageId?: string, imageIndex?: number): Promise<void> {
+    const store = this.store, transcript = this.transcript, files = this.attachments;
+    if (!store || !transcript || !files) throw new Error('请先打开 QQ 会话');
+    const active = vscode.window.activeTextEditor;
+    let source: vscode.Uri;
+    if (typeof uri === 'string') source = vscode.Uri.parse(uri);
+    else {
+      if (!active || !this.native.historyMatches(active.document)) throw new Error('请将光标放到聊天记录的 [图片] 上');
+      source = active.document.uri;
+      const key = transcript.key(source);
+      const span = key && transcript.rendered.get(key)?.images.find(s => s.line === active.selection.active.line && active.selection.active.character >= s.start && active.selection.active.character < s.end);
+      if (!span) throw new Error('请将光标放到聊天记录的 [图片] 上');
+      messageId = span.messageId; imageIndex = span.imageIndex;
+    }
+    const key = transcript.key(source);
+    if (!key || typeof messageId !== 'string' || !Number.isInteger(imageIndex) || imageIndex! < 0) throw new Error('图片不属于当前账号的会话');
+    const operation = `${store.selfId}:${key}:${messageId}:${imageIndex}`;
+    if (this.importingMessageImages.has(operation)) return;
+    this.importingMessageImages.add(operation);
+    let attachment: Attachment | undefined;
+    try {
+      const file = await transcript.image(source, messageId, imageIndex!);
+      const bytes = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(file)));
+      if (store !== this.store || transcript !== this.transcript) throw new Error('账号已切换，请重新选择图片');
+      const message = store.messages.get(key)?.find(m => m.id === messageId);
+      attachment = await files.stage(bytes, '聊天记录图片', message?.localImages?.[imageIndex!]?.sticker);
+      if (store !== this.store || transcript !== this.transcript) throw new Error('账号已切换，请重新选择图片');
+      // A slow download must not insert into whichever conversation became active later.
+      if (active && vscode.window.activeTextEditor === active && transcript.key(active.document.uri) === key) {
+        this.target = key;
+        await this.native.insert(key, [attachment]);
+        if (store === this.store && vscode.window.activeTextEditor === active) {
+          if (!this.native.inDraft(active)) await this.native.focus(active);
+          this.latest(active, false);
+        }
+      } else store.attach(key, [attachment]);
+    } finally {
+      if (attachment && !store.draft(key).attachments.some(a => a.id === attachment!.id)) await files.discard([attachment]);
+      this.importingMessageImages.delete(operation);
+    }
   }
   attachToDraft(key: string, attachments: Attachment[]): Promise<void> { return this.native.insert(key, attachments); }
   async focusInput(): Promise<void> {

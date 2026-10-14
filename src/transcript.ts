@@ -118,14 +118,15 @@ export class Transcript implements vscode.TextDocumentContentProvider, vscode.Do
       return new vscode.Hover(md);
     }
     const md = new vscode.MarkdownString();
-    md.isTrusted = { enabledCommands: ['qq.openImage'] };
+    md.isTrusted = { enabledCommands: ['qq.openImage', 'qq.insertMessageImage'] };
     try {
       const file = await this.image(doc.uri, span.messageId, span.imageIndex);
       if (token.isCancellationRequested) return;
       md.supportHtml = true;
       md.appendMarkdown(imagePreviewMarkup(file, await fs.readFile(file), doc) + '\n\n');
     } catch (error: any) { md.appendText(error.message); md.appendMarkdown('\n\n'); }
-    md.appendMarkdown(`[打开大图](${this.command(doc.uri, span).toString()})`);
+    const insert = vscode.Uri.parse(`command:qq.insertMessageImage?${encodeURIComponent(JSON.stringify(this.imageArgs(doc.uri, span)))}`);
+    md.appendMarkdown(`[打开大图](${this.command(doc.uri, span).toString()}) · [引用到发送栏](${insert.toString()})`);
     return new vscode.Hover(md, this.range(span));
   }
   imageRanges(uri: vscode.Uri): vscode.Range[] {
