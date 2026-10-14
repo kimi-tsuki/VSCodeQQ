@@ -57,7 +57,7 @@
 也可以在能使用 `code` 命令的终端里安装：
 
 ```sh
-code --install-extension ./artifacts/vscode-qq-0.1.13.vsix --force
+code --install-extension ./artifacts/vscode-qq-0.1.14.vsix --force
 ```
 
 没有安装包时，安装 Node.js 22 或更高版本及 Git，在终端执行：
