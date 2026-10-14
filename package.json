@@ -391,6 +391,14 @@
     "configuration": {
       "title": "QQ",
       "properties": {
+        "qq.codeLanguage": {
+          "type": "string",
+          "enum": ["c", "python", "javascript", "typescript", "dart", "kotlin", "java", "swift"],
+          "enumItemLabels": ["C", "Python", "JavaScript", "TypeScript", "Dart", "Kotlin", "Java", "Swift"],
+          "default": "c",
+          "scope": "application",
+          "description": "聊天记录的代码语言显示风格。保存后立即刷新，保留草稿和消息原文。"
+        },
         "qq.wsUrl": {
           "type": "string",
           "default": "ws://127.0.0.1:3001",

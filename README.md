@@ -28,7 +28,7 @@
 - 支持纯图片、纯表情，以及文字和附件一起发送。收藏表情按图片表情发送，GIF 保持原文件。
 - 图片通过插件缓存处理，发送时使用 OneBot 图片消息段；支持 NapCat 在另一台机器运行，不要求它访问编辑器的本地文件路径。
 
-引用、昵称和正文使用专用 `qq-chat` 语言及 C 风格 TextMate 作用域，例如：
+引用、昵称和正文使用专用 `qq-chat` 语言，默认显示为 C 风格，例如：
 
 ```c
 #define CHAT_NAME "开发群"
@@ -66,6 +66,7 @@ void send_reply_123456(void) {  // 我
 | --- | --- | --- |
 | `qq.wsUrl` | `ws://127.0.0.1:3001` | OneBot v11 正向 WebSocket 地址 |
 | `qq.autoConnect` | `true` | 打开 QQ 视图后自动连接 |
+| `qq.codeLanguage` | `c` | 聊天记录代码风格：`c`、`python`、`javascript`、`typescript`、`dart`、`kotlin`、`java`、`swift` |
 | `qq.historyCount` | `50` | 初次读取历史数量 |
 | `qq.messageLimit` | `500` | 每个会话显示与缓存上限，最高 2000 |
 
@@ -98,6 +99,8 @@ node dist/test/live.cjs "path/to/tuiqq/config.json"
 打包产物：`artifacts/vscode-qq-0.1.10.vsix`。Windows 安装命令：`node scripts/install-extension.cjs`。
 
 ## 连接设置页面
+
+页面中的“代码语言风格”支持 C（默认）、Python、JavaScript、TypeScript、Dart、Kotlin、Java 和 Swift，也可以在 VS Code 设置中搜索 `qq.codeLanguage`。保存后刷新已打开的聊天记录；暂时隐藏的聊天在重新显示时刷新。切换仅影响显示，保留草稿、附件和引用，复制与发送仍使用原文。聊天文档继续使用 `qq-chat` 语言及专用高亮；底部草稿分隔线保持固定格式，用于保护历史和区分待发送内容。
 
 点击 QQ 列表或收藏标题栏的齿轮，或运行 `QQ: 连接设置`。页面提供 WebSocket 地址、Token、自动连接、测试连接、仅保存、保存并连接和导入 tuiqq 配置。Token 保存在 VS Code 安全存储中，留空保持已保存的值，勾选清除可移除。测试连接只验证 NapCat 登录信息，不改变现有连接，也不保存表单。
 

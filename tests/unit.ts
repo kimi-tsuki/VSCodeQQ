@@ -11,6 +11,48 @@ import { MediaCache, imageExtension, previewDimensions } from '../src/media';
 import { allowsUnread, groupNotification, NotificationSync } from '../src/notifications';
 import { AttachmentFiles } from '../src/attachments';
 import { MockNapCat, png } from './fixture';
+import { codeLanguages, codeStyle, isCodeLanguage } from '../src/codeStyle';
+
+test('八种代码风格保留原文、图片、引用和操作位置', () => {
+  const raw = '😀 "$name"\\\n第二行 ${value}\t[回复][重试]';
+  const msg = parseMessage({ message_id: 42, user_id: 123, message: [
+    { type: 'reply', data: { id: '99' } }, { type: 'text', data: { text: raw } },
+    { type: 'image', data: { file: 'a' } }, { type: 'text', data: { text: '\n末行' } }, { type: 'image', data: { file: 'b' } }
+  ] }, 'group:1', '123');
+  msg.sendState = 'failed';
+  const chat = newChat('group', '1', '测试 $chat'), snapshot = JSON.stringify(msg);
+  const markers = {
+    c: ['void send_reply_123(void) {', 'char msg[] ='], python: ['def send_reply_123():', 'msg = ('],
+    javascript: ['function send_reply_123() {', 'const msg ='], typescript: ['function send_reply_123(): void {', 'const msg: string ='],
+    dart: ['void send_reply_123() {', 'String msg ='], kotlin: ['fun send_reply_123() {', 'val msg ='],
+    java: ['void send_reply_123() {', 'String msg ='], swift: ['func send_reply_123() {', 'let msg =']
+  };
+  for (const language of codeLanguages) {
+    const view = renderTranscript(chat, [msg], '123', language), lines = view.text.split('\n');
+    for (const marker of markers[language]) assert.ok(view.text.includes(marker), `${language}: ${marker}`);
+    assert.equal(view.images.length, 2);
+    for (const span of view.images) assert.equal(lines[span.line].slice(span.start, span.end), '[图片]');
+    assert.equal(view.actions.length, 2);
+    for (const action of view.actions) {
+      assert.equal(lines[action.line].slice(action.start, action.start + 4), action.kind === 'reply' ? '[回复]' : '[重试]');
+      assert.equal(view.messages.get(action.line), msg.id);
+    }
+    assert.ok(view.ownLines.includes(view.starts.get(msg.id)!));
+    assert.ok(view.text.includes('replay'));
+    assert.ok(renderTranscript(chat, [], '123', language).text.includes('暂无消息'));
+    if (language === 'dart' || language === 'kotlin') {
+      assert.ok(view.text.includes('\\$name')); assert.ok(view.text.includes('\\${value}'));
+    }
+    if (['javascript', 'typescript', 'kotlin', 'java', 'swift'].includes(language)) assert.ok(view.text.includes('\\n" +\n'));
+    assert.equal(JSON.stringify(msg), snapshot);
+  }
+  assert.equal(renderTranscript(chat, [msg], '123').text, renderTranscript(chat, [msg], '123', 'c').text);
+  assert.equal(messageText(msg), raw + '[图片]\n末行[图片]');
+  for (const invalid of [undefined, null, '', 'ruby', {}, 1]) assert.equal(isCodeLanguage(invalid), false);
+  assert.equal(codeStyle('swift').escape('\\u2028\\b\\f'), '\\u{2028}\\u{0008}\\u{000c}');
+  assert.equal(codeStyle('swift').escape('\\\\u2028'), '\\\\u2028');
+  assert.equal(codeStyle('kotlin').escape('\\f\\\\f'), '\\u000c\\\\f');
+});
 
 test('混合消息保留图片元数据、引用和 UTF-16 图片位置', () => {
   const msg = parseMessage({ message_id: 1, time: 1, sender: { user_id: 2, nickname: '张三' }, message: [

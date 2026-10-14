@@ -1,11 +1,17 @@
 import * as vscode from 'vscode';
 import * as fs from 'node:fs/promises';
+import { CodeLanguage, isCodeLanguage } from './codeStyle';
+export function configuredCodeLanguage(): CodeLanguage {
+  const value = vscode.workspace.getConfiguration('qq').get('codeLanguage');
+  return isCodeLanguage(value) ? value : 'c';
+}
 export function validateUrl(value: string): string | undefined {
   try { const url = new URL(value); if (!['ws:', 'wss:'].includes(url.protocol) || !url.hostname) return '请输入 ws:// 或 wss:// 地址'; if (url.username || url.password) return '请在 Token 输入框填写鉴权信息'; } catch { return '请输入有效的 WebSocket 地址'; }
   return undefined;
 }
 export class Configuration {
   constructor(private context: vscode.ExtensionContext) {}
+  get codeLanguage(): CodeLanguage { return configuredCodeLanguage(); }
   get url(): string { return vscode.workspace.getConfiguration('qq').get('wsUrl', 'ws://127.0.0.1:3001'); }
   get historyCount(): number { return Math.max(10, Math.min(500, vscode.workspace.getConfiguration('qq').get('historyCount', 50))); }
   get messageLimit(): number { return Math.max(50, Math.min(2000, vscode.workspace.getConfiguration('qq').get('messageLimit', 500))); }
