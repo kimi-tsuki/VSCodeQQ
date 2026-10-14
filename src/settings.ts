@@ -81,6 +81,10 @@ export class ConnectionSettings implements vscode.Disposable {
         if (typeof data[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(data[key])) throw new Error('高亮颜色格式无效'); updates.push([key, data[key]]);
       }
       if (data.notifications !== undefined) { if (!['all', 'mentions', 'off'].includes(data.notifications)) throw new Error('提醒设置无效'); updates.push(['notifications', data.notifications]); }
+      const settings = vscode.workspace.getConfiguration('qq');
+      const keys = ['wsUrl', 'autoConnect', ...updates.map(([key]) => key), ...(data.codeLanguage !== undefined ? ['codeLanguage'] : [])];
+      const missing = keys.filter(key => settings.inspect(key)?.defaultValue === undefined);
+      if (missing.length) throw new Error(`插件配置尚未加载（${missing.map(key => 'qq.' + key).join('、')}）。请执行 Developer: Reload Window（开发人员: 重新加载窗口），重新打开 QQ 设置后保存。本次未写入设置。`);
       await this.config.saveConnection(url, token, data.autoConnect);
       for (const [key, value] of updates) await vscode.workspace.getConfiguration('qq').update(key, value, vscode.ConfigurationTarget.Global);
       if (data.codeLanguage !== undefined) await vscode.workspace.getConfiguration('qq').update('codeLanguage', data.codeLanguage, vscode.ConfigurationTarget.Global);

@@ -12,7 +12,7 @@ export interface Chat {
 }
 export interface ImageRef { file: string; url?: string; }
 export interface FileRef { id: string; name: string; url?: string; busid?: number; size?: number; }
-export type Segment = { type: 'text'; text: string; file?: FileRef } | { type: 'image'; image: ImageRef };
+export type Segment = { type: 'text'; text: string; at?: string; atName?: string; file?: FileRef } | { type: 'image'; image: ImageRef };
 export interface Message {
   id: string; chatKey: string; senderId: string; senderName: string;
   time: number; segments: Segment[]; replyId?: string; mentioned: boolean; replyToSelf?: boolean;
@@ -109,7 +109,7 @@ export function parseMessage(raw: any, key?: string, selfId = ''): Message {
       case 'at': {
         const qq = id(data.qq);
         result.mentioned ||= qq === selfId || qq === 'all';
-        result.segments.push({ type: 'text', text: qq === 'all' ? '@全体成员' : `@${inline(data.name || qq)}` });
+        result.segments.push({ type: 'text', at: qq, atName: inline(data.name) || undefined, text: qq === 'all' ? '@全体成员' : `@${inline(data.name || qq)}` });
         break;
       }
       default: {

@@ -439,3 +439,36 @@ test('接收文件保留元数据，下载原子写入，取消不覆盖已有�
     assert.deepEqual(await fs.readdir(folder), ['download.txt']);
   } finally { await backend.close(); await fs.rm(folder, { recursive: true, force: true }); }
 });
+
+
+test('真实 @ 按群名片/昵称显示，成员更新刷新引用，普通数字文本与原文不变', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-at-names-'));
+  const store = new ChatStore(folder, '123');
+  try {
+    const chat = newChat('group', 1, '群'); store.upsert(chat);
+    const message = parseMessage({ message_id: 10, user_id: 456, message: [
+      { type: 'at', data: { qq: 789 } }, { type: 'text', data: { text: ' @789 ' } },
+      { type: 'at', data: { qq: 'all' } }, { type: 'at', data: { qq: 999, name: '服务端昵称' } }
+    ] }, chat.key, '123');
+    const raw = messageText(message);
+    store.add(message, false);
+    store.add(parseMessage({ message_id: 11, user_id: 123, message: [
+      { type: 'reply', data: { id: 10 } }, { type: 'text', data: { text: '回复' } }
+    ] }, chat.key, '123'), false);
+    assert.ok(messageText(store.displayMessages(chat.key)[0]).startsWith('@789'));
+    store.setMembers(chat.key, [{ user_id: 789, card: '群名片', nickname: '昵称' }]);
+    assert.equal(messageText(store.displayMessages(chat.key)[0]), '@群名片 @789 @全体成员@服务端昵称');
+    const rendered = renderTranscript(chat, store.displayMessages(chat.key), '123');
+    assert.ok(rendered.text.split('\n').some(l => l.includes('replay') && l.includes('@群名片')));
+    assert.equal(messageText(message), raw);
+    store.setMembers(chat.key, [{ user_id: 789, nickname: '新昵称' }]);
+    assert.ok(messageText(store.displayMessages(chat.key)[0]).startsWith('@新昵称'));
+    await store.flush();
+    const restored = new ChatStore(folder, '123');
+    try {
+      await restored.restore(); await restored.load(chat.key);
+      restored.setMembers(chat.key, [{ user_id: 789, card: '恢复名片' }]);
+      assert.ok(messageText(restored.displayMessages(chat.key)[0]).startsWith('@恢复名片'));
+    } finally { await restored.dispose(); }
+  } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});

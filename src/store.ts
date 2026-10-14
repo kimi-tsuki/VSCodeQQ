@@ -101,7 +101,15 @@ export class ChatStore extends EventEmitter {
       let name = member?.name || message.senderName;
       const friend = message.senderId !== this.selfId && this.chats.get(`private:${message.senderId}`);
       if (friend && key.startsWith('private:')) name = friend.name;
-      return { ...message, senderName: name, senderRemark: friend ? friend.remark : undefined, senderNickname: member?.nickname || message.senderNickname || (friend ? friend.nickname : undefined), senderTitle: member?.title || message.senderTitle, senderRole: member?.role || message.senderRole };
+      const segments = message.segments.map(segment => {
+        if (segment.type !== 'text' || !segment.at) return segment;
+        const member = this.members.get(key)?.get(segment.at);
+        const friend = this.chats.get(`private:${segment.at}`);
+        const displayName = (member?.name !== segment.at ? member?.name : undefined)
+          || segment.atName || friend?.remark || friend?.nickname || friend?.name || segment.at;
+        return { ...segment, text: segment.at === 'all' ? '@全体成员' : `@${displayName}` };
+      });
+      return { ...message, segments, senderName: name, senderRemark: friend ? friend.remark : undefined, senderNickname: member?.nickname || message.senderNickname || (friend ? friend.nickname : undefined), senderTitle: member?.title || message.senderTitle, senderRole: member?.role || message.senderRole };
     });
   }
   add(message: Message, countUnread: boolean): boolean {
