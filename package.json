@@ -1,0 +1,434 @@
+{
+  "name": "vscode-qq",
+  "displayName": "QQ · Native Chat",
+  "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
+  "version": "0.1.7",
+  "publisher": "rynxis",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "onFileSystem:qqchat",
+    "onLanguage:qq-chat"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test dist/test/unit.cjs",
+    "test:extension": "node scripts/run-extension-tests.cjs",
+    "test:live": "node dist/test/live.cjs",
+    "package": "node scripts/package.mjs"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qq",
+          "title": "QQ",
+          "icon": "media/qq.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "qq-input-panel",
+          "title": "QQ 表情与附件",
+          "icon": "media/qq.svg"
+        }
+      ]
+    },
+    "views": {
+      "qq": [
+        {
+          "id": "qq.list",
+          "name": "列表"
+        },
+        {
+          "id": "qq.favorites",
+          "name": "收藏"
+        }
+      ],
+      "qq-input-panel": [
+        {
+          "id": "qq.composer",
+          "name": "QQ 表情与附件",
+          "type": "webview"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "qq.list",
+        "contents": "暂无会话。\n[连接设置](command:qq.configure)\n[连接 NapCat](command:qq.connect)"
+      },
+      {
+        "view": "qq.favorites",
+        "contents": "右键会话添加收藏。\n[连接设置](command:qq.configure)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "qq.connect",
+        "title": "QQ: 连接 / 重新连接 NapCat",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "qq.disconnect",
+        "title": "QQ: 断开连接"
+      },
+      {
+        "command": "qq.configure",
+        "title": "QQ: 连接设置",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "qq.importConfig",
+        "title": "QQ: 导入 tuiqq 配置"
+      },
+      {
+        "command": "qq.refresh",
+        "title": "QQ: 刷新会话",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "qq.search",
+        "title": "QQ: 搜索会话",
+        "icon": "$(search)"
+      },
+      {
+        "command": "qq.openChat",
+        "title": "QQ: 打开会话"
+      },
+      {
+        "command": "qq.toggleFavorite",
+        "title": "QQ: 收藏 / 取消收藏",
+        "icon": "$(star-empty)"
+      },
+      {
+        "command": "qq.markRead",
+        "title": "QQ: 标记已读",
+        "icon": "$(check)"
+      },
+      {
+        "command": "qq.focusInput",
+        "title": "QQ: 输入消息",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "qq.reply",
+        "title": "QQ: 回复这条消息",
+        "icon": "$(reply)"
+      },
+      {
+        "command": "qq.copyMessage",
+        "title": "QQ: 复制消息原文"
+      },
+      {
+        "command": "qq.openImage",
+        "title": "QQ: 打开图片"
+      },
+      {
+        "command": "qq.latest",
+        "title": "QQ: 跳到最新消息",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "qq.loadHistory",
+        "title": "QQ: 加载更多记录",
+        "icon": "$(history)"
+      },
+      {
+        "command": "qq.toggleIgnoreUnread",
+        "title": "QQ: 忽略 / 恢复此会话未读"
+      },
+      {
+        "command": "qq.search.favorites",
+        "title": "QQ: 搜索收藏",
+        "icon": "$(search)"
+      },
+      {
+        "command": "qq.clearSearch.favorites",
+        "title": "QQ: 清除收藏搜索",
+        "icon": "$(close)"
+      },
+      {
+        "command": "qq.send",
+        "title": "QQ: 发送草稿",
+        "icon": "$(send)"
+      },
+      {
+        "command": "qq.insertImage",
+        "title": "QQ: 插入图片",
+        "icon": "$(file-media)"
+      },
+      {
+        "command": "qq.emojis",
+        "title": "QQ: 表情与附件",
+        "icon": "$(smiley)"
+      },
+      {
+        "command": "qq.restoreTranscript",
+        "title": "QQ: 重建聊天文档（恢复已缓存草稿）",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "qq.openDraftImage",
+        "title": "QQ: 预览草稿图片"
+      },
+      {
+        "command": "qq.cancelReply",
+        "title": "QQ: 取消回复"
+      },
+      {
+        "command": "qq.newline",
+        "title": "QQ: 草稿换行"
+      },
+      {
+        "command": "qq.show.list",
+        "title": "列表"
+      },
+      {
+        "command": "qq.show.favorites",
+        "title": "收藏"
+      },
+      {
+        "command": "qq.search.list",
+        "title": "QQ: 搜索列表",
+        "icon": "$(search)"
+      },
+      {
+        "command": "qq.clearSearch.list",
+        "title": "QQ: 清除列表搜索",
+        "icon": "$(close)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "qq.configure",
+          "when": "view == qq.list || view == qq.favorites",
+          "group": "navigation@9"
+        },
+        {
+          "command": "qq.refresh",
+          "when": "view == qq.list || view == qq.favorites"
+        },
+        {
+          "command": "qq.importConfig",
+          "when": "view == qq.list || view == qq.favorites"
+        },
+        {
+          "command": "qq.disconnect",
+          "when": "view == qq.list || view == qq.favorites"
+        },
+        {
+          "command": "qq.search.list",
+          "when": "view == qq.list",
+          "group": "navigation@3"
+        },
+        {
+          "command": "qq.clearSearch.list",
+          "when": "view == qq.list && qq.list.filtered",
+          "group": "navigation@4"
+        },
+        {
+          "command": "qq.search.favorites",
+          "when": "view == qq.favorites",
+          "group": "navigation@3"
+        },
+        {
+          "command": "qq.clearSearch.favorites",
+          "when": "view == qq.favorites && qq.favorites.filtered",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "qq.toggleFavorite",
+          "when": "viewItem == qq-chat",
+          "group": "inline@1"
+        },
+        {
+          "command": "qq.markRead",
+          "when": "viewItem == qq-chat",
+          "group": "qq@1"
+        },
+        {
+          "command": "qq.toggleIgnoreUnread",
+          "when": "viewItem == qq-chat",
+          "group": "qq@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "qq.focusInput",
+          "when": "resourceScheme == qqchat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "qq.latest",
+          "when": "resourceScheme == qqchat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "qq.loadHistory",
+          "when": "resourceScheme == qqchat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "qq.insertImage",
+          "when": "resourceScheme == qqchat",
+          "group": "navigation@4"
+        },
+        {
+          "command": "qq.emojis",
+          "when": "resourceScheme == qqchat",
+          "group": "navigation@5"
+        },
+        {
+          "command": "qq.send",
+          "when": "resourceScheme == qqchat",
+          "group": "navigation@6"
+        },
+        {
+          "command": "qq.restoreTranscript",
+          "when": "resourceScheme == qqchat"
+        },
+        {
+          "command": "qq.cancelReply",
+          "when": "resourceScheme == qqchat"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "qq.reply",
+          "when": "resourceScheme == qqchat",
+          "group": "qq@1"
+        },
+        {
+          "command": "qq.copyMessage",
+          "when": "resourceScheme == qqchat",
+          "group": "qq@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "qq.clearSearch.favorites",
+          "when": "qq.favorites.filtered"
+        },
+        {
+          "command": "qq.clearSearch.list",
+          "when": "qq.list.filtered"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "qq.reply",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "editorTextFocus && resourceScheme == qqchat"
+      },
+      {
+        "command": "qq.send",
+        "key": "enter",
+        "when": "editorTextFocus && resourceScheme == qqchat && qq.inDraft && !isComposing"
+      },
+      {
+        "command": "qq.newline",
+        "key": "shift+enter",
+        "when": "editorTextFocus && resourceScheme == qqchat && qq.inDraft && !isComposing"
+      },
+      {
+        "command": "qq.newline",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && resourceScheme == qqchat && qq.inDraft && !isComposing"
+      }
+    ],
+    "languages": [
+      {
+        "id": "qq-chat",
+        "aliases": [
+          "QQ Chat"
+        ],
+        "extensions": [
+          ".qqchat"
+        ],
+        "icon": {
+          "light": "./media/qq-chat.svg",
+          "dark": "./media/qq-chat.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "qq-chat",
+        "scopeName": "source.qq-chat",
+        "path": "./syntaxes/qq-chat.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[qq-chat]": {
+        "editor.wordWrap": "on",
+        "editor.minimap.enabled": false,
+        "editor.lineNumbers": "on",
+        "editor.renderWhitespace": "none",
+        "editor.quickSuggestions": false,
+        "editor.unicodeHighlight.ambiguousCharacters": false,
+        "editor.unicodeHighlight.nonBasicASCII": false
+      }
+    },
+    "configuration": {
+      "title": "QQ",
+      "properties": {
+        "qq.wsUrl": {
+          "type": "string",
+          "default": "ws://127.0.0.1:3001",
+          "scope": "application",
+          "description": "NapCat OneBot v11 正向 WebSocket 地址。Token 通过 QQ: 设置连接地址与 Token 保存。"
+        },
+        "qq.autoConnect": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "打开 QQ 视图时自动连接。"
+        },
+        "qq.historyCount": {
+          "type": "number",
+          "default": 50,
+          "minimum": 10,
+          "maximum": 500,
+          "scope": "application",
+          "description": "首次打开会话拉取的历史消息数。"
+        },
+        "qq.messageLimit": {
+          "type": "number",
+          "default": 500,
+          "minimum": 50,
+          "maximum": 2000,
+          "scope": "application",
+          "description": "每个会话显示和缓存的消息上限。"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "ws": "^8.18.3",
+    "image-size": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/vscode": "^1.95.0",
+    "@types/ws": "^8.18.1",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "typescript": "~5.9.3"
+  }
+}

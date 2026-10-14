@@ -1,0 +1,225 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { once } from 'node:events';
+import { newChat, parseMessage, renderTranscript, messageText, mergeMessages, draftParts } from '../src/model';
+import { OneBotClient } from '../src/onebot';
+import { ChatStore } from '../src/store';
+import { MediaCache, imageExtension, previewDimensions } from '../src/media';
+import { allowsUnread, groupNotification, NotificationSync } from '../src/notifications';
+import { AttachmentFiles } from '../src/attachments';
+import { MockNapCat, png } from './fixture';
+
+test('混合消息保留图片元数据、引用和 UTF-16 图片位置', () => {
+  const msg = parseMessage({ message_id: 1, time: 1, sender: { user_id: 2, nickname: '张三' }, message: [
+    { type: 'text', data: { text: '😀正文\n第二行' } }, { type: 'image', data: { file: 'a', url: 'https://example.com/a.png' } },
+    { type: 'reply', data: { id: '99' } }, { type: 'image', data: { file: 'b' } }, { type: 'at', data: { qq: '123' } }
+  ] }, 'group:1', '123');
+  const view = renderTranscript(newChat('group', '1', '测试群'), [msg], '123');
+  assert.equal(msg.replyId, '99'); assert.equal(msg.mentioned, true);
+  assert.equal(view.images.length, 2);
+  for (const span of view.images) assert.equal(view.text.split('\n')[span.line].slice(span.start, span.end), '[图片]');
+  assert.equal(msg.segments[1].type, 'image');
+  assert.equal(messageText(msg), '😀正文\n第二行[图片][图片]@123');
+});
+
+test('纯文本 [图片] 不是图片链接；陌生段降级为文字', () => {
+  const msg = parseMessage({ message: [{ type: 'text', data: { text: '[图片] <script> [run](command:evil)' } }, { type: 'unknown', data: {} }] }, 'private:1');
+  const view = renderTranscript(newChat('private', 1, '好友'), [msg], '123');
+  assert.equal(view.images.length, 0); assert.ok(view.text.includes('[消息]')); assert.ok(view.text.includes('<script>'));
+});
+
+test('代码投影转义引号、反斜杠、控制字符；多行和图片位置仍准确', () => {
+  const raw = '"\\ 😀\n第二行\t';
+  const msg = parseMessage({ message_id: 42, sender: { nickname: '名"字' }, message: [{ type: 'text', data: { text: raw } }, { type: 'image', data: { file: 'x' } }] }, 'group:1');
+  const view = renderTranscript(newChat('group', 1, '测试'), [msg], '123');
+  assert.ok(view.text.startsWith('#define CHAT_NAME "测试"'));
+  assert.ok(view.text.includes('void recv_')); assert.ok(view.text.includes('名\\"字'));
+  assert.ok(view.text.includes('                 "第二行\\t[图片]";'));
+  assert.equal(messageText(msg), raw + '[图片]');
+  for (const s of view.images) assert.equal(view.text.split('\n')[s.line].slice(s.start, s.end), '[图片]');
+});
+
+test('INFO、引用字段与操作位置分离，正文中的伪按钮不会成为操作', () => {
+  const original = parseMessage({ message_id: 10, user_id: 123, message: '原文' }, 'group:1', '123');
+  const reply = parseMessage({ message_id: 11, sender: { user_id: 456, card: '群名片', title: '头衔', role: 'admin' }, message: [{ type: 'reply', data: { id: 10 } }, { type: 'text', data: { text: '[回复]\\n[重试]' } }] }, 'group:1', '123');
+  const mine = { ...original, id: 'local:failed', sendState: 'failed' as const };
+  const view = renderTranscript(newChat('group', 1, '测试'), [original, reply, mine], '123');
+  const lines = view.text.split('\n');
+  assert.ok(view.text.includes('#define INFO "头衔" "群名片"'));
+  assert.ok(view.text.includes('void reply_456(void) {  // 管理员 · 回复我'));
+  assert.ok(view.text.includes('char replay[] = "123：原文";'));
+  assert.equal(view.actions.filter(a => a.kind === 'reply').length, 2);
+  for (const a of view.actions) {
+    assert.equal(lines[a.line].slice(a.start, a.start + 4), a.kind === 'reply' ? '[回复]' : '[重试]');
+    assert.ok(a.kind === 'reply' ? lines[a.line].endsWith(';  // [回复]') : lines[a.line].startsWith('}  // 发送失败'));
+  }
+});
+
+test('悬浮图片限制宽高、保持比例、小图不放大', () => {
+  const dimensions = (w: number, h: number) => { const bytes = Buffer.from(png); bytes.writeUInt32BE(w, 16); bytes.writeUInt32BE(h, 20); return previewDimensions(bytes); };
+  assert.deepEqual(dimensions(4000, 1000), { width: 240, height: 60 });
+  assert.deepEqual(dimensions(1000, 8000), { width: 20, height: 160 });
+  assert.deepEqual(dimensions(80, 40), { width: 80, height: 40 });
+});
+
+test('免打扰只使用消息接收档位，未知群不显示未读，好友支持本地忽略', () => {
+  const chat = newChat('group', 1, '群'); chat.unread = 9;
+  for (const mask of [2, 3, 4, '4']) { chat.notification = groupNotification({ cmdUinMsgMask: mask }); assert.equal(allowsUnread(chat), false); }
+  chat.notification = groupNotification({ group_all_shut: -1 }); assert.equal(allowsUnread(chat), false);
+  chat.notification = groupNotification({ cmdUinMsgMask: 1, group_all_shut: -1 }); assert.equal(allowsUnread(chat), true);
+  chat.ignoreUnread = true; assert.equal(allowsUnread(chat), false);
+  chat.ignoreUnread = false; chat.notification = 'muted';
+  chat.mentioned = true; assert.equal(allowsUnread(chat), true);
+  chat.mentioned = false; chat.replied = true; assert.equal(allowsUnread(chat), true);
+  chat.ignoreUnread = true; assert.equal(allowsUnread(chat), false);
+  const friend = newChat('private', 1, '好友'); assert.equal(allowsUnread(friend), true);
+  friend.ignoreUnread = true; assert.equal(allowsUnread(friend), false);
+});
+
+test('占位符按正文顺序展开，删除后不发送；重复可复用，未知标记拒绝发送', () => {
+  const attachment = { id: 'x', kind: 'image' as const, label: '图', placeholder: '[图片:1]' };
+  assert.deepEqual(draftParts('前[图片:1]后[图片:1]', [attachment]), ['前', attachment, '后', attachment]);
+  assert.deepEqual(draftParts('删掉了图片', [attachment]), ['删掉了图片']);
+  assert.throws(() => draftParts('[图片:2]', [attachment]), /没有对应附件/);
+  assert.throws(() => draftParts('[图片:1]'.repeat(9), [attachment]), /最多发送 8/);
+  assert.deepEqual(draftParts('[图片]', []), ['[图片]']);
+});
+
+test('自己发出的私聊根据 target_id 归入目标会话', () => {
+  const msg = parseMessage({ message_type: 'private', user_id: 123, target_id: 456, message: 'hello' }, undefined, '123');
+  assert.equal(msg.chatKey, 'private:456');
+});
+
+test('历史和实时消息去重，零 ID 消息独立保留', () => {
+  const raw = { message_id: 1, time: 1, message: 'old' };
+  const history = [parseMessage(raw, 'group:1')];
+  const live = [parseMessage({ ...raw, message: 'new' }, 'group:1')];
+  const merged = mergeMessages(history, live, 500);
+  assert.equal(merged.length, 1); assert.equal(messageText(merged[0]), 'new');
+  const zeros = [parseMessage({ message_id: 0 }, 'group:1'), parseMessage({ message_id: 0 }, 'group:1')];
+  assert.equal(mergeMessages([], zeros, 500).length, 2);
+});
+
+test('缓存恢复、未读去重、收藏和草稿版本保护', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'vscodeqq-store-'));
+  const store = new ChatStore(folder, '123');
+  const chat = newChat('group', 1, '测试群'); store.upsert(chat);
+  try {
+    const msg = parseMessage({ message_id: 1, user_id: 2, message: 'hello' }, chat.key);
+    assert.equal(store.add(msg, true), true); assert.equal(store.add(msg, true), false);
+    assert.equal(chat.unread, 1);
+    store.toggleFavorite(chat.key);
+    const sent = store.setDraft(chat.key, '第一条'); store.setDraft(chat.key, '下一条');
+    assert.equal(store.clearDraftIfVersion(chat.key, sent.version), false);
+    await store.flush();
+    const other = new ChatStore(folder, '123'); await other.restore(); await other.load(chat.key);
+    assert.equal(other.draft(chat.key).text, '下一条'); assert.equal(other.messages.get(chat.key)?.length, 1);
+    assert.equal(other.favorites.has(chat.key), true); assert.equal(other.chats.get(chat.key)?.unread, 1);
+    other.markRead(chat.key); assert.equal(other.chats.get(chat.key)?.unread, 0);
+    await other.dispose();
+  } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('收到新消息后保存不会覆盖尚未读取的磁盘历史', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'vscodeqq-merge-'));
+  const first = new ChatStore(folder, '123');
+  first.upsert(newChat('group', 1, '群'));
+  first.add(parseMessage({ message_id: 1, time: 1, message: '历史' }, 'group:1'), false); await first.dispose();
+  const second = new ChatStore(folder, '123');
+  try {
+    await second.restore(); second.add(parseMessage({ message_id: 2, time: 2, message: '新消息' }, 'group:1'), true); await second.flush();
+    assert.deepEqual(second.messages.get('group:1')?.map(m => m.id), ['1', '2']);
+  } finally { await second.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('未完成的发送持久化、重启标为未确认，成功回执合并去重', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'vscodeqq-outbox-'));
+  const store = new ChatStore(folder, '123'); const chat = newChat('group', 1, '群'); store.upsert(chat);
+  try {
+    const message = parseMessage({ user_id: 123, message: '待发送' }, chat.key, '123');
+    message.sendState = 'sending'; message.outgoing = store.setDraft(chat.key, '待发送');
+    store.add(message, false); store.completeSend(chat.key, message.outgoing); await store.flush();
+    const restored = new ChatStore(folder, '123'); await restored.restore(); await restored.load(chat.key);
+    assert.equal(restored.messages.get(chat.key)![0].sendState, 'uncertain');
+    assert.equal(restored.messages.get(chat.key)![0].outgoing!.text, '待发送');
+    const echo = { ...message, id: '101', outgoing: undefined, sendState: undefined };
+    restored.add(echo, false); restored.settleOutgoing(chat.key, message.id, echo);
+    assert.equal(restored.messages.get(chat.key)!.length, 1);
+    assert.equal(restored.messages.get(chat.key)![0].sendState, 'sent');
+    await restored.dispose();
+  } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('WebSocket echo、错误、超时和断线立即结束请求', async () => {
+  const backend = new MockNapCat(); await backend.start();
+  const client = new OneBotClient(5000);
+  try {
+    await client.connect(backend.url);
+    const [a,b] = await Promise.all([client.call('echo', { n: 1 }), client.call('echo', { n: 2 })]);
+    assert.equal(a.n, 1); assert.equal(b.n, 2);
+    await assert.rejects(client.call('timeout', {}, 40), /超时/);
+    backend.failSend = true;
+    await assert.rejects(client.call('send_msg', { message: [] }), /请求失败/);
+    await assert.rejects(client.call('disconnect', {}, 2000), /中断/);
+  } finally { client.dispose(); await backend.close(); }
+});
+
+test('意外断线自动重连，手动断开后停止重连', async () => {
+  const backend = new MockNapCat(); await backend.start();
+  const client = new OneBotClient(20);
+  try {
+    await client.connect(backend.url);
+    const connected = once(client, 'connected');
+    await assert.rejects(client.call('disconnect'), /中断/); await connected;
+    assert.equal(client.connected, true);
+    client.disconnect(); await new Promise(r => setTimeout(r, 80)); assert.equal(client.connected, false);
+  } finally { client.dispose(); await backend.close(); }
+});
+
+test('图片惰性下载、过期 URL 回退与缓存复用', async () => {
+  const backend = new MockNapCat(); await backend.start();
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'vscodeqq-media-'));
+  const client = new OneBotClient();
+  try {
+    await client.connect(backend.url); const media = new MediaCache(folder, client);
+    const ref = { file: 'sample', url: 'file:///not-allowed.png' };
+    const [a,b] = await Promise.all([media.get(ref), media.get(ref)]);
+    assert.equal(a,b); assert.deepEqual(await fs.readFile(a), png);
+    assert.equal(backend.calls.filter(c => c.action === 'get_image').length, 1);
+    await media.get(ref); assert.equal(backend.calls.filter(c => c.action === 'get_image').length, 1);
+    assert.equal(imageExtension(Buffer.from('<svg onload="evil()"></svg>')), undefined);
+  } finally { client.dispose(); await backend.close(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('图片和收藏表情转换成可供远端 NapCat 发送的消息段', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'vscodeqq-attachments-'));
+  try {
+    const files = new AttachmentFiles(folder);
+    const picture = await files.stage(png, '测试图片');
+    const sticker = await files.stage(png, '收藏表情', true);
+    const segments = await files.segments([picture, sticker, { id: 'face', kind: 'face', label: '微笑', faceId: '14' }]) as any[];
+    assert.equal(segments[0].data.file, `base64://${png.toString('base64')}`);
+    assert.equal(segments[1].data.sub_type, 1);
+    assert.deepEqual(segments[2], { type: 'face', data: { id: '14' } });
+    await assert.rejects(files.stage(Buffer.from('<svg/>'), '不支持'), /请选择/);
+    await assert.rejects(files.read({ ...picture, file: path.join(folder, '..', 'outside.png') }), /路径无效/);
+  } finally { await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('发送完成只移除已经发送的附件，保留新草稿与新附件', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'vscodeqq-draft-'));
+  const store = new ChatStore(folder, '123');
+  try {
+    store.upsert(newChat('group', 1, '群'));
+    store.attach('group:1', [{ id: 'first', kind: 'face', label: '微笑', faceId: '14' }]);
+    const captured = store.draft('group:1');
+    store.setDraft('group:1', '后续文字');
+    store.attach('group:1', [{ id: 'second', kind: 'face', label: '赞', faceId: '76' }]);
+    assert.equal(store.completeSend('group:1', captured), false);
+    assert.equal(store.draft('group:1').text, '后续文字' + store.draft('group:1').attachments.find(a => a.id === 'second')!.placeholder);
+    assert.deepEqual(store.draft('group:1').attachments.map(a => a.id), ['second']);
+  } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});

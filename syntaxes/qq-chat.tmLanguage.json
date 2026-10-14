@@ -1,0 +1,60 @@
+{
+  "scopeName": "source.qq-chat",
+  "patterns": [
+    {
+      "begin": "^// ─── 草稿 · Enter 发送 · Shift/Ctrl\\+Enter 换行 ───$",
+      "end": "(?!)",
+      "beginCaptures": {
+        "0": {
+          "name": "comment.line.double-slash.c"
+        }
+      },
+      "contentName": "text.qq-draft",
+      "patterns": [
+        {
+          "match": "\\[(?:图片|表情):\\d+\\]",
+          "name": "constant.other.placeholder.c"
+        }
+      ]
+    },
+    {
+      "match": "^\\s*#\\s*define\\b",
+      "name": "keyword.control.directive.define.c"
+    },
+    {
+      "match": "\\b(?:INFO|CHAT_NAME|GROUP_ID|FRIEND_ID)\\b",
+      "name": "entity.name.function.preprocessor.c"
+    },
+    {
+      "match": "\\b(?:void|char)\\b",
+      "name": "storage.type.c"
+    },
+    {
+      "match": "\\b(?:send_reply|send|reply|recv)_[0-9a-z]+(?=\\()",
+      "name": "entity.name.function.c"
+    },
+    {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.c"
+    },
+    {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.c",
+      "patterns": [
+        {
+          "match": "\\\\(?:[\"\\\\nrtbf/]|u[0-9a-fA-F]{4})",
+          "name": "constant.character.escape.c"
+        }
+      ]
+    },
+    {
+      "match": "\\b[0-9]+\\b",
+      "name": "constant.numeric.c"
+    },
+    {
+      "match": "[(),;]",
+      "name": "punctuation.separator.c"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+src/**
+tests/**
+scripts/**
+node_modules/**
+.test-*/**
+.vscode/**
+.vscode-test/**
+.codex/**
+.agents/**
+.aws/**
+artifacts/**
+dist/test/**
+**/*.map
+tsconfig.json
+package-lock.json
+.gitignore

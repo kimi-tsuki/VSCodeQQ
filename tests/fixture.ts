@@ -1,0 +1,96 @@
+import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, Server } from 'node:http';
+import { deflateSync } from 'node:zlib';
+export const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+function samplePng(width: number, height: number): Buffer {
+  const chunk = (name: string, data: Buffer) => {
+    const bytes = Buffer.concat([Buffer.from(name), data]); let crc = 0xffffffff;
+    for (const b of bytes) { crc ^= b; for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0); }
+    const size = Buffer.alloc(4), check = Buffer.alloc(4); size.writeUInt32BE(data.length); check.writeUInt32BE((crc ^ 0xffffffff) >>> 0);
+    return Buffer.concat([size, bytes, check]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 2;
+  const rows = Buffer.alloc((width * 3 + 1) * height, 160);
+  for (let y = 0; y < height; y++) rows[y * (width * 3 + 1)] = 0;
+  return Buffer.concat([png.subarray(0, 8), chunk('IHDR', header), chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
+}
+export const tallPng = samplePng(128, 2048), widePng = samplePng(2048, 128);
+export class MockNapCat {
+  server!: WebSocketServer;
+  http!: Server;
+  url = '';
+  imageUrl = '';
+  calls: any[] = [];
+  sent: any[] = [];
+  sentMessages = new Map<number, any>();
+  sendDelay = 0;
+  detailDelay = 0;
+  emitSent = true;
+  historyDelay = 0;
+  failSend = false;
+  sequence = 9000;
+  masks = new Map<string, number | null>([['20001', 1], ['20002', 1]]);
+  async start(): Promise<void> {
+    this.http = createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'image/png' }); res.end(req.url?.includes('tall') ? tallPng : req.url?.includes('wide') ? widePng : png); });
+    await new Promise<void>(resolve => this.http.listen(0, '127.0.0.1', resolve));
+    const httpPort = (this.http.address() as any).port;
+    this.imageUrl = `http://127.0.0.1:${httpPort}/image.png`;
+    this.server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+    await new Promise<void>(resolve => this.server.once('listening', resolve));
+    this.url = `ws://127.0.0.1:${(this.server.address() as any).port}`;
+    this.server.on('connection', socket => socket.on('message', async bytes => {
+      const req = JSON.parse(bytes.toString()); this.calls.push(req);
+      const respond = (data: unknown, status = 'ok') => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ status, retcode: status === 'ok' ? 0 : 100, data, echo: req.echo })); };
+      switch (req.action) {
+        case 'get_login_info': respond({ user_id: 123456, nickname: '测试账号' }); break;
+        case 'get_friend_list': respond([{ user_id: 10001, nickname: '张三', remark: '测试好友' }]); break;
+        case 'get_group_list': respond([{ group_id: 20001, group_name: '原生界面验证群' }, { group_id: 20002, group_name: '另一个会话' }]); break;
+        case 'get_group_detail_info': respond({ cmdUinMsgMask: this.masks.get(String(req.params.group_id)) }); break;
+        case 'get_group_member_list': respond([{ user_id: 10001, card: '群名片', nickname: '张三', role: 'admin', title: '调试员' }, { user_id: 123456, card: '我的名片', role: 'member' }]); break;
+        case 'get_group_msg_history': case 'get_friend_msg_history': {
+          if (this.historyDelay) await new Promise(resolve => setTimeout(resolve, this.historyDelay));
+          respond({ messages: this.history() }); break;
+        }
+        case 'get_image': respond({ url: this.imageUrl }); break;
+        case 'fetch_custom_face': respond([this.imageUrl, this.imageUrl + '?second']); break;
+        case 'get_msg':
+          if (this.detailDelay) await new Promise(resolve => setTimeout(resolve, this.detailDelay));
+          respond(this.sentMessages.get(Number(req.params.message_id))); break;
+        case 'send_msg': {
+          this.sent.push(req.params);
+          if (this.sendDelay) await new Promise(resolve => setTimeout(resolve, this.sendDelay));
+          if (this.failSend) { respond(null, 'failed'); break; }
+          const message_id = ++this.sequence;
+          const message = req.params.message.map((s: any) => s.type === 'image' ? { type: 'image', data: { file: `sent-${message_id}.png`, url: this.imageUrl } } : s);
+          const event = { ...this.message(message_id), post_type: 'message_sent', message_type: req.params.message_type, group_id: req.params.group_id, target_id: req.params.user_id, user_id: 123456, sender: { user_id: 123456, nickname: '我' }, message };
+          this.sentMessages.set(message_id, event);
+          if (this.emitSent) this.emit(event); respond({ message_id }); break;
+        }
+        case 'timeout': break;
+        case 'disconnect': socket.close(); break;
+        default: respond(req.params);
+      }
+    }));
+  }
+  message(message_id = 501, text = '实时消息'): any {
+    return { post_type: 'message', self_id: 123456, message_type: 'group', group_id: 20001, message_id, time: Math.floor(Date.now()/1000), user_id: 10001, sender: { user_id: 10001, nickname: '张三' }, message: [{ type: 'text', data: { text } }] };
+  }
+  history(): any[] {
+    const base = Math.floor(Date.now()/1000) - 180;
+    const messages = Array.from({ length: 60 }, (_, i) => ({ ...this.message(1000 + i, i === 0 ? '第一条历史记录' : `消息 ${i}：原生编辑器主题、行号和选择行为。`), time: base + i }));
+    messages.push({ ...this.message(1200), time: base + 65, message: [{ type: 'reply', data: { id: '1000' } }, { type: 'text', data: { text: '结果如下：' } }, { type: 'image', data: { file: 'fixture.png', url: this.imageUrl } }, { type: 'text', data: { text: '\n第二行保持原文。' } }] });
+    return messages;
+  }
+  emit(event: unknown): void { for (const socket of this.server.clients) if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event)); }
+  async close(): Promise<void> {
+    for (const socket of this.server.clients) socket.terminate();
+    await Promise.all([
+      new Promise<void>(resolve => this.server.close(() => resolve())),
+      new Promise<void>(resolve => this.http.close(() => resolve()))
+    ]);
+  }
+}
+export async function until(check: () => boolean, timeout = 8000): Promise<void> {
+  const end = Date.now() + timeout;
+  while (!check()) { if (Date.now() > end) throw new Error('等待条件超时'); await new Promise(resolve => setTimeout(resolve, 30)); }
+}

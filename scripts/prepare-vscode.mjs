@@ -1,0 +1,28 @@
+import { mkdir, writeFile, readFile, rename, unlink, access } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+const root = path.resolve('.vscode-test');
+const executable = path.join(root, 'runtime', 'Code.exe');
+try { await access(executable); console.log('Isolated VS Code test runtime already exists.'); process.exit(0); } catch {}
+await mkdir(root, { recursive: true });
+const metadata = await fetch('https://update.code.visualstudio.com/api/update/win32-x64-archive/stable/latest', { signal: AbortSignal.timeout(30000) });
+if (!metadata.ok) throw new Error(`VS Code metadata request failed: ${metadata.status}`);
+const info = await metadata.json();
+if (!info.url?.startsWith('https://') || !/^[a-f0-9]{64}$/i.test(info.sha256hash)) throw new Error('Missing official download checksum');
+console.log(`Downloading isolated VS Code ${info.productVersion}`);
+const file = path.join(root, 'vscode.zip');
+const response = await fetch(info.url, { signal: AbortSignal.timeout(240000) });
+if (!response.ok || !response.body) throw new Error(`Download failed: ${response.status}`);
+await pipeline(Readable.fromWeb(response.body), createWriteStream(file + '.part'));
+const checksum = createHash('sha256').update(await readFile(file + '.part')).digest('hex');
+if (checksum !== info.sha256hash) throw new Error('VS Code archive checksum mismatch');
+await rename(file + '.part', file);
+const result = spawnSync('python3', ['-m', 'zipfile', '-e', file, path.join(root, 'runtime')], { stdio: 'inherit' });
+if (result.status !== 0) throw new Error('VS Code extraction failed');
+await writeFile(path.join(root, 'version.json'), JSON.stringify({ version: info.productVersion, sha256: checksum }, null, 2));
+await unlink(file);
+console.log('Isolated VS Code test runtime ready.');

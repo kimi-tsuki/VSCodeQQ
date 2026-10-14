@@ -1,0 +1,15 @@
+node_modules/
+dist/
+artifacts/
+.test-profile/
+.test-extensions/
+.test-output/
+*.log
+.vscode-test/
+config.json
+.codex/
+.agents/
+.aws/
+.env
+.env.*
+scripts/remote-tasks.json
