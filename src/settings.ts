@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { Configuration, validateUrl } from './configuration';
 import { OneBotClient } from './onebot';
+import { codeLanguages, isCodeLanguage } from './codeStyle';
 
 export class ConnectionSettings implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
@@ -10,7 +11,7 @@ export class ConnectionSettings implements vscode.Disposable {
   constructor(private context: vscode.ExtensionContext, private config: Configuration, private connect: () => Promise<void>, private cacheInfo: () => Promise<{ bytes: number; count: number }>, private cleanCache: () => Promise<number>) {}
   async state() {
     const settings = vscode.workspace.getConfiguration('qq');
-    return { historyCount: settings.get('historyCount', 50), messageLimit: settings.get('messageLimit', 500), notifications: settings.get('notifications', 'all'), cacheRetentionDays: settings.get('cacheRetentionDays', 7), mentionColor: settings.get('mentionColor', '#E5A030'), replyColor: settings.get('replyColor', '#409CFF'), cache: await this.cacheInfo(), url: this.config.url, hasToken: !!await this.config.token(), autoConnect: vscode.workspace.getConfiguration('qq').get('autoConnect', true) };
+    return { codeLanguage: this.config.codeLanguage, historyCount: settings.get('historyCount', 50), messageLimit: settings.get('messageLimit', 500), notifications: settings.get('notifications', 'all'), cacheRetentionDays: settings.get('cacheRetentionDays', 7), mentionColor: settings.get('mentionColor', '#E5A030'), replyColor: settings.get('replyColor', '#409CFF'), cache: await this.cacheInfo(), url: this.config.url, hasToken: !!await this.config.token(), autoConnect: vscode.workspace.getConfiguration('qq').get('autoConnect', true) };
   }
   open(): void {
     if (this.panel) { this.panel.reveal(); return; }
@@ -34,6 +35,7 @@ export class ConnectionSettings implements vscode.Disposable {
       <label for="replyColor">回复我高亮颜色</label><input id="replyColor" type="color"><p class="help">使用淡色背景和左侧色条，同时 @我和回复我时优先显示 @我颜色。</p>
       <h2>附件缓存</h2><label for="cacheRetentionDays">无引用附件保留天数</label><input id="cacheRetentionDays" type="number" min="1" max="90" required>
       <p id="cacheInfo" class="help"></p><button type="button" id="cleanCache" class="secondary">清理无用附件缓存</button><p class="help">保护草稿、撤销记录、发送队列和历史图片；最近一小时导入的附件暂不清理。</p>
+      <label for="codeLanguage">代码语言风格</label><select id="codeLanguage" aria-describedby="codeLanguageHelp">${codeLanguages.map((value, i) => `<option value="${value}">${['C（默认）', 'Python', 'JavaScript', 'TypeScript', 'Dart', 'Kotlin', 'Java', 'Swift'][i]}</option>`).join('')}</select><p class="help" id="codeLanguageHelp">仅改变聊天记录的代码显示风格；保存后立即生效，草稿和消息原文保持不变。</p>
       <div class="actions"><button type="submit" id="connect">保存并连接</button><button type="button" id="save" class="secondary">仅保存</button><button type="button" id="test" class="secondary">测试连接</button></div>
       <div class="import"><button type="button" id="import" class="secondary">导入 tuiqq 配置</button><span class="help">选择现有的 config.json。</span></div>
       </fieldset></form><p id="result" role="status" aria-live="polite">正在读取设置…</p>
@@ -59,6 +61,7 @@ export class ConnectionSettings implements vscode.Disposable {
         return { state: await this.state(), message: imported ? '配置已导入，点击“保存并连接”应用。' : '已取消导入。' };
       }
       if (typeof data.url !== 'string' || typeof data.token !== 'string' || typeof data.autoConnect !== 'boolean' || typeof data.clearToken !== 'boolean') throw new Error('连接配置格式无效');
+      if (data.codeLanguage !== undefined && !isCodeLanguage(data.codeLanguage)) throw new Error('代码语言风格无效');
       const url = data.url.trim(), invalid = validateUrl(url); if (invalid) throw new Error(invalid);
       const token = data.clearToken ? '' : data.token || undefined;
       if (data.action === 'test') {
@@ -80,6 +83,7 @@ export class ConnectionSettings implements vscode.Disposable {
       if (data.notifications !== undefined) { if (!['all', 'mentions', 'off'].includes(data.notifications)) throw new Error('提醒设置无效'); updates.push(['notifications', data.notifications]); }
       await this.config.saveConnection(url, token, data.autoConnect);
       for (const [key, value] of updates) await vscode.workspace.getConfiguration('qq').update(key, value, vscode.ConfigurationTarget.Global);
+      if (data.codeLanguage !== undefined) await vscode.workspace.getConfiguration('qq').update('codeLanguage', data.codeLanguage, vscode.ConfigurationTarget.Global);
       if (data.action === 'connect') {
         try { await this.connect(); }
         catch (error: any) { return { state: await this.state(), error: `配置已保存，但连接失败：${error.message}` }; }

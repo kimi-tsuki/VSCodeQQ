@@ -26,7 +26,7 @@
       "name": "entity.name.function.preprocessor.c"
     },
     {
-      "match": "\\b(?:void|char)\\b",
+      "match": "\\b(?:void|char|String|string|const|function|def|val|let|final|fun|func)\\b",
       "name": "storage.type.c"
     },
     {
@@ -38,12 +38,16 @@
       "name": "comment.line.double-slash.c"
     },
     {
+      "match": "#(?!define\\b).*$",
+      "name": "comment.line.number-sign.python"
+    },
+    {
       "begin": "\"",
       "end": "\"",
       "name": "string.quoted.double.c",
       "patterns": [
         {
-          "match": "\\\\(?:[\"\\\\nrtbf/]|u[0-9a-fA-F]{4})",
+          "match": "\\\\(?:[\"\\\\nrtbf/$]|u[0-9a-fA-F]{4}|u\\{[0-9a-fA-F]+\\})",
           "name": "constant.character.escape.c"
         }
       ]

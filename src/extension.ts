@@ -139,6 +139,11 @@ export class QQApp implements vscode.Disposable {
       }));
     }
     this.commands();
+    this.disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration('qq.codeLanguage')) {
+        for (const key of this.store?.chats.keys() ?? []) this.native.schedule(key, true);
+      }
+    }));
     this.disposables.push(vscode.window.onDidChangeActiveTextEditor(editor => {
       this.native.updateContext();
       const key = editor && this.transcript?.key(editor.document.uri);
@@ -152,7 +157,11 @@ export class QQApp implements vscode.Disposable {
       this.checkRead(); this.updateNewMessages();
     }), vscode.window.onDidChangeVisibleTextEditors(editors => {
       for (const editor of this.following.keys()) if (!editors.includes(editor)) this.following.delete(editor);
-      for (const editor of editors) this.decorate(editor);
+      for (const editor of editors) {
+        const key = this.transcript?.key(editor.document.uri);
+        if (key) this.native.schedule(key, true);
+        this.decorate(editor);
+      }
     }), vscode.window.onDidChangeWindowState(() => this.checkRead()),
     vscode.window.onDidChangeTextEditorSelection(event => {
       this.native.updateContext();

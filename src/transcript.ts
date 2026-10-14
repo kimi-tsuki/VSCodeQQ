@@ -4,6 +4,7 @@ import { ChatStore } from './store';
 import { MediaCache } from './media';
 import { AttachmentFiles } from './attachments';
 import { imagePreviewMarkup } from './imageHover';
+import { configuredCodeLanguage } from './configuration';
 import { Chat, Message, Rendered, Span, renderTranscript, splitKey } from './model';
 
 export class Transcript implements vscode.TextDocumentContentProvider, vscode.DocumentLinkProvider, vscode.HoverProvider, vscode.Disposable {
@@ -33,7 +34,7 @@ export class Transcript implements vscode.TextDocumentContentProvider, vscode.Do
     const key = this.key(uri); const chat = key && this.store.chats.get(key);
     if (!chat || !key) return '// 当前账号中没有这个会话，请从 QQ 列表重新打开。';
     this.uris.set(key, uri);
-    const content = renderTranscript(chat, this.store.displayMessages(key), this.store.selfId);
+    const content = renderTranscript(chat, this.store.displayMessages(key), this.store.selfId, configuredCodeLanguage());
     this.rendered.set(key, content); return content.text;
   }
   invalidate(key: string): void {
@@ -42,7 +43,7 @@ export class Transcript implements vscode.TextDocumentContentProvider, vscode.Do
       this.timer = undefined;
       for (const item of this.dirty) {
         const uri = this.uris.get(item), chat = this.store.chats.get(item);
-        if (uri && chat && renderTranscript(chat, this.store.displayMessages(item), this.store.selfId).text !== this.rendered.get(item)?.text) this.emitter.fire(uri);
+        if (uri && chat && renderTranscript(chat, this.store.displayMessages(item), this.store.selfId, configuredCodeLanguage()).text !== this.rendered.get(item)?.text) this.emitter.fire(uri);
       }
       this.dirty.clear();
     }, 100);

@@ -26,12 +26,15 @@ export async function run(): Promise<void> {
     await app.settings.handle({ action: 'save', ...form });
     const settingsState = await app.settings.state();
     assert.equal(settingsState.hasToken, true);
+    assert.equal(settingsState.codeLanguage, 'c');
+    await assert.rejects(app.settings.handle({ action: 'save', ...form, codeLanguage: 'invalid' }), /代码语言风格/);
     assert.ok(!JSON.stringify(settingsState).includes(form.token));
     await app.settings.handle({ action: 'save', ...form, token: '' });
     assert.equal(await app.config.token(), form.token);
     await assert.rejects(app.settings.handle({ action: 'save', ...form, url: 'https://invalid.example' }), /ws:\/\//);
     assert.equal(app.config.url, backend.url);
-    const probeResult = await app.settings.handle({ action: 'test', ...form, token: '' });
+    const probeResult = await app.settings.handle({ action: 'test', ...form, token: '', codeLanguage: 'dart' });
+    assert.equal(app.config.codeLanguage, 'c', '测试连接不保存语言设置');
     assert.ok(probeResult.message.includes('123456'));
     assert.equal(app.client.connected, false);
     await app.settings.handle({ action: 'save', ...form, token: '', clearToken: true });
@@ -76,6 +79,25 @@ export async function run(): Promise<void> {
     assert.ok(doc.getText().includes('void recv_')); assert.ok(doc.getText().includes(DRAFT_DIVIDER));
     await until(() => doc.getText().includes('#define INFO "调试员" "群名片"') && doc.getText().includes('// 管理员') && doc.getText().includes('备注：测试好友'));
     checks.push('原生虚拟文档、历史消息和 C 风格语言');
+    app.store!.setDraft('group:20001', '切换风格时保留\n草稿 $value', '1000');
+    await until(() => app!.native.draft(doc) === '切换风格时保留\n草稿 $value');
+    for (const [codeLanguage, marker] of [['python', 'def recv_'], ['javascript', 'function recv_'], ['typescript', ': void {'], ['dart', 'String msg ='], ['kotlin', 'fun recv_'], ['java', 'final String CHAT_NAME'], ['swift', 'func recv_'], ['c', 'void recv_']]) {
+      await app.settings.handle({ action: 'save', ...form, token: '', codeLanguage });
+      await until(() => doc.getText().includes(marker) && app!.native.historyMatches(doc));
+      assert.equal(app.native.draft(doc), '切换风格时保留\n草稿 $value');
+      assert.equal(app.store!.draft('group:20001').replyId, '1000');
+      assert.equal(doc.languageId, 'qq-chat');
+      const styleLinks = await vscode.commands.executeCommand<vscode.DocumentLink[]>('vscode.executeLinkProvider', doc.uri);
+      assert.equal(styleLinks.filter(l => l.target?.path === 'qq.openImage').length, 1);
+      for (const link of styleLinks.filter(l => l.target?.path === 'qq.reply')) assert.equal(doc.getText(link.range), '[回复]');
+    }
+    await vscode.workspace.getConfiguration('qq').update('codeLanguage', 'dart', vscode.ConfigurationTarget.Global);
+    await until(() => doc.getText().includes('String msg ='));
+    await vscode.workspace.getConfiguration('qq').update('codeLanguage', 'c', vscode.ConfigurationTarget.Global);
+    await until(() => doc.getText().includes('char msg[]'));
+    app.store!.setDraft('group:20001', '');
+    await until(() => app!.native.draft(doc) === '');
+    checks.push('八种语言热切换、VS Code 设置生效、草稿/引用保留和图片/回复位置');
     const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>('vscode.executeLinkProvider', doc.uri);
     assert.equal(links.filter(l => l.target?.path === 'qq.openImage').length, 1);
     const replyLink = links.find(l => l.target?.path === 'qq.reply')!;
@@ -192,7 +214,7 @@ export async function run(): Promise<void> {
     assert.equal(backend.sent.at(-1).message[0].data.sub_type, 1);
     checks.push('收藏表情读取与表情图片发送');
     await app.openChat('group:20002');
-    const editor = vscode.window.activeTextEditor!;
+    let editor = vscode.window.activeTextEditor!;
     await app.native.sync(editor);
     await app.native.focus(editor);
     await editor.edit(edit => edit.insert(editor.selection.active, '前后'));
@@ -416,6 +438,7 @@ export async function run(): Promise<void> {
     assert.equal(backend.sent.length, beforeReuse);
     checks.push('历史图片悬浮/右键引用到发送栏、多图定位、保留草稿与回复、去重和切换会话保护、不自动发送');
     await app.openChat('group:20002');
+    editor = vscode.window.activeTextEditor!;
     console.log('Image reuse checks passed');
     for (const [i, shape] of ['tall', 'wide', 'tall'].entries()) {
       if (i === 2) await ui.call('Emulation.setDeviceMetricsOverride', { width: 1100, height: 480, deviceScaleFactor: 1, mobile: false });
@@ -435,7 +458,14 @@ export async function run(): Promise<void> {
       assert.ok(preview?.length, `没有悬浮内容：${shape}`);
       assert.ok(editor.selection.active.isEqual(position), '预览位置被异步历史更新覆盖');
       await vscode.commands.executeCommand('notifications.clearAll');
-      await vscode.commands.executeCommand('editor.action.showHover', { focus: false });
+      await ui.call('Page.bringToFront');
+      await ui.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+      await vscode.commands.executeCommand('editor.action.hideHover');
+      editor.selection = new vscode.Selection(position, position);
+      editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+      await new Promise(r => setTimeout(r, 300));
+      assert.ok(editor.selection.active.isEqual(position), '打开悬浮前光标应保持在图片处');
+      await vscode.commands.executeCommand('editor.action.showHover', { focus: true });
       await new Promise(r => setTimeout(r, 1000));
       const debugShot = await ui.call('Page.captureScreenshot', { format: 'png' });
       await fs.writeFile(path.join(output, 'hover-debug.png'), Buffer.from(debugShot.data, 'base64'));
