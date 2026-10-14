@@ -17,7 +17,7 @@ export class ChatTree implements vscode.TreeDataProvider<Chat>, vscode.Disposabl
     const store = this.getStore(); if (!store) return [];
     const terms = this.filter.toLocaleLowerCase().split(/\s+/).filter(Boolean);
     return [...store.chats.values()].filter(chat => {
-      if (!terms.every(term => `${chat.name} ${chat.id}`.toLocaleLowerCase().includes(term))) return false;
+      if (!terms.every(term => `${chat.name} ${chat.remark ?? ''} ${chat.nickname ?? ''} ${chat.id}`.toLocaleLowerCase().includes(term))) return false;
       switch (this.section) {
         case 'favorites': return store.favorites.has(chat.key);
         case 'list': return true;

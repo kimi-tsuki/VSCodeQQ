@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { attachmentPattern, Attachment, Chat, Draft, Member, Message, emptyDraft, id, inline, mergeMessages, messageText, splitKey } from './model';
+import { attachmentPattern, Attachment, Chat, Draft, Member, Message, emptyDraft, id, inline, isPending, mergeMessages, messageText, splitKey } from './model';
 
 export class ChatStore extends EventEmitter {
   readonly chats = new Map<string, Chat>();
   readonly messages = new Map<string, Message[]>();
+  readonly outbox = new Map<string, Message>();
   readonly favorites = new Set<string>();
   readonly drafts = new Map<string, Draft>();
   readonly members = new Map<string, Map<string, Member>>();
@@ -16,12 +17,18 @@ export class ChatStore extends EventEmitter {
   private saveTimer?: NodeJS.Timeout;
   private saving: Promise<void> = Promise.resolve();
   private attachmentSerial = 0;
-  constructor(readonly folder: string, readonly selfId: string, readonly limit = 500) { super(); }
+  constructor(readonly folder: string, readonly selfId: string, public limit = 500) { super(); }
   async restore(): Promise<void> {
     try {
       const data = JSON.parse(await fs.readFile(path.join(this.folder, 'state.json'), 'utf8'));
       this.attachmentSerial = Number(data.attachmentSerial) || 0;
       for (const chat of data.chats ?? []) { try { splitKey(chat.key); this.chats.set(chat.key, { ...chat, notification: 'unknown' }); } catch {} }
+      for (const message of data.outbox ?? []) {
+        if (!this.chats.has(message.chatKey) || !isPending(message)) continue;
+        if (['sending', 'queued'].includes(message.sendState)) { message.sendState = 'uncertain'; message.sendError = '上次关闭时结果未确认，请检查聊天记录后重试'; }
+        this.outbox.set(message.id, message);
+        this.messages.set(message.chatKey, [...this.messages.get(message.chatKey) ?? [], message]);
+      }
       for (const key of data.favorites ?? []) if (this.chats.has(key)) this.favorites.add(key);
       for (const [key, draft] of Object.entries(data.drafts ?? {})) {
         const d = draft as Draft;
@@ -42,9 +49,31 @@ export class ChatStore extends EventEmitter {
         }
         this.messages.set(key, mergeMessages(valid, this.messages.get(key) ?? [], this.limit));
       } catch (error: any) { if (error.code !== 'ENOENT') this.emit('storageError', new Error('部分聊天缓存无法读取')); }
+      this.trackOutbox(key);
       this.loaded.add(key); this.loading.delete(key);
     })();
     this.loading.set(key, task); await task;
+  }
+  private trackOutbox(key: string): void {
+    for (const [id, m] of this.outbox) if (m.chatKey === key) this.outbox.delete(id);
+    for (const m of this.messages.get(key) ?? []) if (isPending(m)) this.outbox.set(m.id, m);
+  }
+  async attachmentReferences(): Promise<Set<string>> {
+    const refs = new Set<string>();
+    const add = (items: Attachment[] = []) => { for (const a of items) if (a.file) refs.add(path.resolve(a.file)); };
+    // Inspect unopened histories one at a time without retaining all chats in memory.
+    for (const key of this.chats.keys()) {
+      if (this.loaded.has(key)) continue;
+      try {
+        const cached = JSON.parse(await fs.readFile(this.file(key), 'utf8'));
+        if (!Array.isArray(cached)) throw new Error('聊天缓存格式异常，暂停清理附件');
+        for (const m of cached) { add(m.outgoing?.attachments); add(m.localImages); }
+      } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+    }
+    // Read current references after filesystem awaits, so edits during the scan are protected.
+    for (const d of this.drafts.values()) add(d.attachments); // Includes bounded undo attachments.
+    for (const messages of this.messages.values()) for (const m of messages) { add(m.outgoing?.attachments); add(m.localImages); }
+    return refs;
   }
   upsert(chat: Chat): void {
     const current = this.chats.get(chat.key);
@@ -52,8 +81,11 @@ export class ChatStore extends EventEmitter {
     this.changed(chat.key);
   }
   history(key: string, messages: Message[]): void {
+    const combined = [...messages, ...this.messages.get(key) ?? []];
+    const own = new Set(combined.filter(m => m.senderId === this.selfId).map(m => m.id));
+    for (const m of combined) if (m.replyId && own.has(m.replyId)) m.replyToSelf = true;
     this.messages.set(key, mergeMessages(messages, this.messages.get(key) ?? [], this.limit));
-    this.dirty.add(key); this.changed(key);
+    this.trackOutbox(key); this.dirty.add(key); this.changed(key);
   }
   setMembers(key: string, data: any[]): void {
     const members = new Map<string, Member>();
@@ -75,16 +107,17 @@ export class ChatStore extends EventEmitter {
   add(message: Message, countUnread: boolean): boolean {
     const current = this.messages.get(message.chatKey) ?? [];
     if (current.some(m => m.id === message.id)) return false;
+    if (message.replyId && current.some(m => m.id === message.replyId && m.senderId === this.selfId)) message.replyToSelf = true;
     this.messages.set(message.chatKey, mergeMessages([], [...current, message], this.limit));
     const chat = this.chats.get(message.chatKey);
     if (chat) {
       if (message.time >= chat.lastTime) { chat.lastTime = message.time; chat.preview = messageText(message).replace(/\s+/g, ' ').slice(0, 100); }
       if (countUnread && message.senderId !== this.selfId) {
         chat.unread++; chat.mentioned ||= message.mentioned;
-        chat.replied ||= !!message.replyId && current.some(m => m.id === message.replyId && m.senderId === this.selfId);
+        chat.replied ||= message.replyToSelf || !!message.replyId && current.some(m => m.id === message.replyId && m.senderId === this.selfId);
       }
     }
-    this.dirty.add(message.chatKey); this.changed(message.chatKey); return true;
+    this.trackOutbox(message.chatKey); this.dirty.add(message.chatKey); this.changed(message.chatKey); return true;
   }
   markRead(key: string): void {
     const chat = this.chats.get(key);
@@ -99,7 +132,7 @@ export class ChatStore extends EventEmitter {
     const index = messages?.findIndex(m => m.id === message.id) ?? -1;
     if (!messages || index < 0) return;
     messages[index] = { ...messages[index], ...message };
-    this.dirty.add(message.chatKey); this.changed(message.chatKey);
+    this.trackOutbox(message.chatKey); this.dirty.add(message.chatKey); this.changed(message.chatKey);
   }
   settleOutgoing(key: string, localId: string, confirmed: Message): Message {
     const current = this.messages.get(key) ?? [];
@@ -109,7 +142,7 @@ export class ChatStore extends EventEmitter {
     const settled = current.filter(m => m.id !== message.id || m.id === localId).map(m => m.id === localId ? message : m);
     if (!local) settled.push(message);
     this.messages.set(key, mergeMessages([], settled, this.limit));
-    this.dirty.add(key); this.changed(key); return message;
+    this.trackOutbox(key); this.dirty.add(key); this.changed(key); return message;
   }
   setNotification(key: string, notification: Chat['notification']): void {
     const chat = this.chats.get(key);
@@ -190,7 +223,7 @@ export class ChatStore extends EventEmitter {
           await this.atomic(this.file(key), this.messages.get(key) ?? []);
         }
         await this.atomic(path.join(this.folder, 'state.json'), {
-          version: 1, attachmentSerial: this.attachmentSerial, chats: [...this.chats.values()], favorites: [...this.favorites],
+          version: 2, outbox: [...this.outbox.values()], attachmentSerial: this.attachmentSerial, chats: [...this.chats.values()], favorites: [...this.favorites],
           drafts: Object.fromEntries([...this.drafts].filter(([, d]) => d.text || d.replyId || d.attachments.length))
         });
       } catch {

@@ -51,6 +51,32 @@ export class AttachmentFiles {
     if (stat.size > 16 * 1024 * 1024) throw new Error('附件过大');
     return fs.readFile(attachment.file);
   }
+  async cacheInfo(): Promise<{ bytes: number; count: number }> {
+    const entries = await this.entries();
+    return { bytes: entries.reduce((n, f) => n + f.size, 0), count: entries.length };
+  }
+  private async entries() {
+    const names = await fs.readdir(this.folder).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return []; throw e; });
+    const entries = await Promise.all(names.map(async name => {
+      const file = path.join(this.folder, name), stat = await fs.lstat(file);
+      return { file, size: stat.size, time: stat.mtimeMs, regular: stat.isFile() };
+    }));
+    return entries.filter(e => e.regular);
+  }
+  async prune(references: Set<string>, retentionDays = 7): Promise<number> {
+    let removed = 0;
+    for (const entry of await this.entries()) {
+      // A grace period also protects imports that have not reached the draft yet.
+      if (references.has(path.resolve(entry.file)) || Date.now() - entry.time < Math.max(1 / 24, retentionDays) * 86400000) continue;
+      await fs.unlink(entry.file); removed += entry.size;
+    }
+    return removed;
+  }
+  async discard(items: Attachment[]): Promise<void> {
+    for (const item of items) {
+      if (item.file && path.dirname(path.resolve(item.file)) === path.resolve(this.folder)) await fs.unlink(item.file).catch(() => {});
+    }
+  }
   async segments(attachments: Attachment[]): Promise<unknown[]> {
     if (attachments.length > 8) throw new Error('附件数量超过上限');
     const segments: unknown[] = []; let size = 0;

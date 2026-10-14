@@ -270,3 +270,85 @@ test('分块上传超过 16 MB 文件，字节完整且进度基于分片回执'
     await assert.rejects(uploadToNapCat(client, file, () => {}, () => { throw new Error('账号已切换'); }), /账号已切换/);
   } finally { client.dispose(); await backend.close(); await fs.rm(folder, { recursive: true, force: true }); }
 });
+
+test('发件箱不受历史上限影响，独立快照恢复并可结算', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-outbox-'));
+  const store = new ChatStore(folder, '123', 50);
+  let restored: ChatStore | undefined;
+  try {
+    store.upsert(newChat('group', 1, '群'));
+    const pending = { ...parseMessage({ message_id: 'local:pending', time: 1, user_id: 123, message: '待发送' }, 'group:1', '123'), sendState: 'sending' as const, outgoing: { text: '待发送', version: 1, attachments: [] } };
+    store.add(pending, false);
+    for (let i = 0; i < 100; i++) store.add(parseMessage({ message_id: 100 + i, time: 2 + i, user_id: 456, message: '收到' }, 'group:1', '123'), true);
+    assert.equal(store.messages.get('group:1')!.length, 51);
+    assert.ok(store.messages.get('group:1')!.some(m => m.id === pending.id));
+    await store.flush();
+    // The outbox in the account snapshot remains usable independently of history.
+    await fs.writeFile(path.join(folder, 'group-1.json'), '[]');
+    restored = new ChatStore(folder, '123', 50); await restored.restore(); await restored.load('group:1');
+    assert.equal(restored.outbox.get(pending.id)?.sendState, 'uncertain');
+    assert.equal(restored.messages.get('group:1')![0].outgoing?.text, '待发送');
+    restored.settleOutgoing('group:1', pending.id, { ...pending, id: '999', time: 200 });
+    assert.equal(restored.outbox.size, 0);
+    await restored.flush();
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(folder, 'state.json'), 'utf8')).outbox, []);
+  } finally { await store.dispose(); await restored?.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('提及和回复分色，提及优先，自发消息不混色，历史裁剪仍保留回复识别', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-highlight-'));
+  const store = new ChatStore(folder, '123', 1);
+  try {
+    const chat = newChat('group', 1, '群'); store.upsert(chat);
+    store.add(parseMessage({ message_id: 1, time: 1, user_id: 123, message: '我' }, chat.key, '123'), false);
+    const reply = parseMessage({ message_id: 2, time: 2, user_id: 456, message: [{ type: 'reply', data: { id: 1 } }, { type: 'text', data: { text: '回复' } }] }, chat.key, '123');
+    store.add(reply, true); assert.equal(reply.replyToSelf, true);
+    const view = renderTranscript(chat, store.displayMessages(chat.key), '123');
+    assert.ok(view.replyLines.length); assert.equal(view.mentionLines.length, 0); assert.ok(view.text.includes('回复我'));
+    const both = { ...reply, mentioned: true };
+    const second = renderTranscript(chat, [both], '123');
+    assert.ok(second.mentionLines.length); assert.equal(second.replyLines.length, 0);
+    const mine = renderTranscript(chat, [{ ...both, senderId: '123' }], '123');
+    assert.ok(mine.ownLines.length); assert.equal(mine.attentionLines.length, 0);
+    store.markRead(chat.key);
+    assert.ok(renderTranscript(chat, store.displayMessages(chat.key), '123').replyLines.length);
+  } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('附件清理保护未打开会话、草稿和撤销引用，删除过期无引用副本', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-cache-'));
+  const store = new ChatStore(folder, '123'); let restored: ChatStore | undefined;
+  try {
+    const files = new AttachmentFiles(path.join(folder, 'outgoing'));
+    store.upsert(newChat('group', 1, '群'));
+    const draft = await files.stage(png, '草稿'), pending = await files.stageFile(Buffer.from('pending'), '排队.txt'), unused = await files.stageFile(Buffer.from('unused'), '无引用.txt');
+    store.attach('group:1', [draft]); store.setDraft('group:1', ''); // Undo reference retained.
+    store.add({ ...parseMessage({ message_id: 'local:file', message: '文件' }, 'group:1', '123'), sendState: 'failed', outgoing: { text: '', version: 1, attachments: [pending] } }, false);
+    const old = new Date(Date.now() - 10 * 86400000);
+    for (const a of [draft, pending, unused]) await fs.utimes(a.file!, old, old);
+    await store.flush(); restored = new ChatStore(folder, '123'); await restored.restore();
+    assert.equal(await files.prune(await restored.attachmentReferences(), 7), 6);
+    await fs.stat(draft.file!); await fs.stat(pending.file!); await assert.rejects(fs.stat(unused.file!));
+    const fresh = await files.stageFile(Buffer.from('import'), '正在导入.txt');
+    await files.prune(new Set(), 0); await fs.stat(fresh.file!);
+  } finally { await store.dispose(); await restored?.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('接收文件保留元数据，下载原子写入，取消不覆盖已有文件', async () => {
+  const { downloadFile } = await import('../src/download');
+  const backend = new MockNapCat(); await backend.start();
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-download-'));
+  try {
+    const msg = parseMessage({ message_id: 7, user_id: 456, message: [{ type: 'text', data: { text: '[文件:普通文字]' } }, { type: 'file', data: { file_id: 'file-7', name: '报告.txt', size: png.length, busid: 102 } }] }, 'group:1', '123');
+    const rendered = renderTranscript(newChat('group', 1, '群'), [msg], '123');
+    assert.equal(rendered.files.length, 1);
+    const span = rendered.files[0]; assert.equal(rendered.text.split('\n')[span.line].slice(span.start, span.end), '[文件:报告.txt]');
+    const file = path.join(folder, 'download.txt');
+    await downloadFile(backend.imageUrl, file, new AbortController().signal);
+    assert.deepEqual(await fs.readFile(file), png);
+    const controller = new AbortController();
+    await assert.rejects(downloadFile(backend.imageUrl, file, controller.signal, () => controller.abort()));
+    assert.deepEqual(await fs.readFile(file), png);
+    assert.deepEqual(await fs.readdir(folder), ['download.txt']);
+  } finally { await backend.close(); await fs.rm(folder, { recursive: true, force: true }); }
+});

@@ -63,10 +63,15 @@ export class Transcript implements vscode.TextDocumentContentProvider, vscode.Do
       const link = new vscode.DocumentLink(this.range(span), this.command(doc.uri, span));
       link.tooltip = '打开 QQ 图片'; return link;
     });
+    for (const span of this.rendered.get(key)?.files ?? []) {
+      const target = vscode.Uri.parse(`command:qq.downloadFile?${encodeURIComponent(JSON.stringify([doc.uri.toString(), span.messageId, span.fileIndex]))}`);
+      const link = new vscode.DocumentLink(new vscode.Range(span.line, span.start, span.line, span.end), target);
+      link.tooltip = '下载文件 / 另存为'; links.push(link);
+    }
     for (const action of this.rendered.get(key)?.actions ?? []) {
-      const target = action.kind === 'reply' ? this.replyCommand(doc.uri, action.messageId) : this.retryCommand(doc.uri, action.messageId);
+      const target = action.kind === 'reply' ? this.replyCommand(doc.uri, action.messageId) : action.kind === 'cancel' ? vscode.Uri.parse(`command:qq.cancelMessage?${encodeURIComponent(JSON.stringify([doc.uri.toString(), action.messageId]))}`) : this.retryCommand(doc.uri, action.messageId);
       const link = new vscode.DocumentLink(new vscode.Range(action.line, action.start, action.line, action.start + 4), target);
-      link.tooltip = action.kind === 'reply' ? '回复这条消息' : '重新发送这条消息'; links.push(link);
+      link.tooltip = action.kind === 'reply' ? '回复这条消息' : action.kind === 'cancel' ? '取消尚未提交的消息' : '重新发送这条消息'; links.push(link);
     }
     return links;
   }
@@ -90,6 +95,15 @@ export class Transcript implements vscode.TextDocumentContentProvider, vscode.Do
   }
   async provideHover(doc: vscode.TextDocument, pos: vscode.Position, token: vscode.CancellationToken): Promise<vscode.Hover | undefined> {
     const key = this.key(doc.uri); if (!key) return;
+    const file = this.rendered.get(key)?.files.find(f => f.line === pos.line && pos.character >= f.start && pos.character <= f.end);
+    if (file) {
+      const message = this.store.messages.get(key)?.find(m => m.id === file.messageId);
+      const ref = message?.segments.filter(s => s.type === 'text' && s.file)[file.fileIndex];
+      const md = new vscode.MarkdownString();
+      if (ref?.type === 'text' && ref.file) md.appendText(`${ref.file.name}${ref.file.size ? ` · ${ref.file.size.toLocaleString()} 字节` : ''}`);
+      md.appendMarkdown(`\n\n[下载 / 另存为](command:qq.downloadFile?${encodeURIComponent(JSON.stringify([doc.uri.toString(), file.messageId, file.fileIndex]))})`);
+      md.isTrusted = { enabledCommands: ['qq.downloadFile'] }; return new vscode.Hover(md);
+    }
     const span = this.rendered.get(key)?.images.find(s => this.range(s).contains(pos));
     if (!span) {
       const message = this.messageAt(doc.uri, pos.line);

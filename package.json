@@ -2,7 +2,7 @@
   "name": "vscode-qq",
   "displayName": "QQ · Native Chat",
   "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "rynxis",
   "license": "MIT",
   "engines": {
@@ -206,6 +206,11 @@
         "command": "qq.clearSearch.list",
         "title": "QQ: 清除列表搜索",
         "icon": "$(close)"
+      },
+      {
+        "command": "qq.insertFile",
+        "title": "QQ: 插入文件",
+        "icon": "$(file)"
       }
     ],
     "menus": {
@@ -385,7 +390,9 @@
         "editor.unicodeHighlight.nonBasicASCII": false,
         "editor.acceptSuggestionOnEnter": "on",
         "editor.dropIntoEditor.enabled": true,
-        "editor.dropIntoEditor.preferences": ["qq.file"]
+        "editor.dropIntoEditor.preferences": [
+          "qq.file"
+        ]
       }
     },
     "configuration": {
@@ -418,6 +425,39 @@
           "maximum": 2000,
           "scope": "application",
           "description": "每个会话显示和缓存的消息上限。"
+        },
+        "qq.notifications": {
+          "type": "string",
+          "enum": [
+            "all",
+            "mentions",
+            "off"
+          ],
+          "default": "all",
+          "scope": "application",
+          "description": "新消息弹窗提醒范围；不影响未读和高亮。"
+        },
+        "qq.cacheRetentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 90,
+          "default": 7,
+          "scope": "application",
+          "description": "无引用附件缓存保留天数。"
+        },
+        "qq.mentionColor": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "default": "#E5A030",
+          "scope": "application",
+          "description": "@我消息高亮颜色（背景自动淡化）。"
+        },
+        "qq.replyColor": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "default": "#409CFF",
+          "scope": "application",
+          "description": "回复我消息高亮颜色（背景自动淡化）。"
         }
       }
     }
@@ -433,5 +473,10 @@
     "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.25.0",
     "typescript": "~5.9.3"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/limelisest/VSCodeQQ.git"
+  },
+  "homepage": "https://github.com/limelisest/VSCodeQQ#readme"
 }

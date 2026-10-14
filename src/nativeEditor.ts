@@ -25,6 +25,8 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
   private saveTimers = new Map<string, NodeJS.Timeout>();
   private updating = new Map<string, Promise<void>>();
   private expectedEdits = new Map<string, string>();
+  private importing = new Map<string, { placeholders?: string[] }>();
+  private importTimers = new Set<NodeJS.Timeout>();
   private repairs = new Set<string>();
   constructor(private host: Host) {}
   watch(): vscode.Disposable { return new vscode.Disposable(() => {}); }
@@ -75,6 +77,10 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     const key = this.host.transcript?.key(doc.uri), store = this.host.store;
     if (!key || !store) return;
     const uri = doc.uri.toString(), text = doc.getText();
+    const importing = this.importing.get(uri);
+    if (importing?.placeholders?.length && importing.placeholders.every(p => this.region(doc)?.text.includes(p))) {
+      this.importing.delete(uri); this.schedule(key, true);
+    }
     const internal = this.expectedEdits.get(uri) === text;
     if (internal) this.expectedEdits.delete(uri);
     if (!internal && changes.length && !this.historyMatches(doc)) {
@@ -122,8 +128,10 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
   }
   async sync(editor: vscode.TextEditor, history = true, restore = false): Promise<void> {
     const uri = editor.document.uri.toString();
+    if (this.importing.has(uri)) { const key = this.host.transcript?.key(editor.document.uri); if (key) this.schedule(key, history); return; }
     const previous = this.updating.get(uri) ?? Promise.resolve();
     const task = previous.catch(() => {}).then(async () => {
+      if (this.importing.has(uri)) { const key = this.host.transcript?.key(editor.document.uri); if (key) this.schedule(key, history); return; }
       const doc = editor.document, key = this.host.transcript?.key(doc.uri), store = this.host.store;
       if (!key || !store || doc.isClosed) return;
       restore ||= this.repairs.has(uri);
@@ -156,6 +164,7 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     this.updating.set(uri, task);
     try { await task; } finally { if (this.updating.get(uri) === task) this.updating.delete(uri); }
   }
+  isImporting(doc: vscode.TextDocument): boolean { return this.importing.has(doc.uri.toString()); }
   isUpdating(doc: vscode.TextDocument): boolean { return this.updating.has(doc.uri.toString()); }
   async focus(editor: vscode.TextEditor): Promise<void> {
     const region = this.region(editor.document);
@@ -219,37 +228,48 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
   async drop(doc: vscode.TextDocument, position: vscode.Position, data: vscode.DataTransfer, token: vscode.CancellationToken): Promise<vscode.DocumentDropEdit | undefined> {
     const key = this.host.transcript?.key(doc.uri), region = this.region(doc), store = this.host.store, files = this.host.attachments;
     if (!key || !region || !store || !files || doc.offsetAt(position) < region.start) return;
-    const version = doc.version;
+    const version = doc.version, documentKey = doc.uri.toString();
+    const operation: { placeholders?: string[] } = {};
+    this.importing.set(documentKey, operation);
     const attachments: Attachment[] = [], seen = new Set<string>();
-    const normalize = (value: string | vscode.Uri): vscode.Uri => {
-      if (typeof value === 'string' && /^[a-z]:[\\/]/i.test(value)) return vscode.Uri.file(value);
-      const uri = typeof value === 'string' ? vscode.Uri.parse(value) : value;
-      // Electron can expose a Windows OS file path as a drive-letter URI.
-      return /^[a-z]$/i.test(uri.scheme) && /^[\\/]/.test(uri.path) ? vscode.Uri.file(uri.scheme + ':' + uri.path) : uri;
-    };
-    const uris = data.get('text/uri-list');
-    const resources: vscode.Uri[] = uris ? (await uris.asString()).split(/\r?\n/).filter(s => s && !s.startsWith('#')).map(s => normalize(s)) : [];
-    const external = [...data].map(([, item]) => item.asFile()).filter((f): f is vscode.DataTransferFile => !!f);
-    for (const file of external) if (file.uri) resources.push(normalize(file.uri));
-    if (resources.length + external.filter(f => !f.uri).length > 8) {
-      // The same file may be offered as both a URI and an OS file entry.
-      if (new Set(resources.map(u => u.toString())).size + external.filter(f => !f.uri).length > 8) throw new Error('每条消息最多附带 8 个附件');
+    try {
+      const normalize = (value: string | vscode.Uri): vscode.Uri => {
+        if (typeof value === 'string' && /^[a-z]:[\\/]/i.test(value)) return vscode.Uri.file(value);
+        const uri = typeof value === 'string' ? vscode.Uri.parse(value) : value;
+        // Electron can expose a Windows OS file path as a drive-letter URI.
+        return /^[a-z]$/i.test(uri.scheme) && /^[\\/]/.test(uri.path) ? vscode.Uri.file(uri.scheme + ':' + uri.path) : uri;
+      };
+      const uris = data.get('text/uri-list');
+      const resources: vscode.Uri[] = uris ? (await uris.asString()).split(/\r?\n/).filter(s => s && !s.startsWith('#')).map(s => normalize(s)) : [];
+      const external = [...data].map(([, item]) => item.asFile()).filter((f): f is vscode.DataTransferFile => !!f);
+      for (const file of external) if (file.uri) resources.push(normalize(file.uri));
+      if (resources.length + external.filter(f => !f.uri).length > 8) {
+        // The same file may be offered as both a URI and an OS file entry.
+        if (new Set(resources.map(u => u.toString())).size + external.filter(f => !f.uri).length > 8) throw new Error('每条消息最多附带 8 个附件');
+      }
+      for (const uri of resources) {
+        const identity = process.platform === 'win32' ? uri.toString().toLowerCase() : uri.toString();
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        if (token.isCancellationRequested) throw new Error('文件导入已取消，请重新拖入');
+        if (uri.scheme !== 'file') throw new Error('请从本机文件管理器拖入文件');
+        attachments.push(await files.stageFilePath(uri.fsPath, path.basename(uri.fsPath)));
+      }
+      for (const file of external.filter(f => !f.uri)) {
+        if (token.isCancellationRequested) throw new Error('文件导入已取消，请重新拖入');
+        attachments.push(await files.stageFile(Buffer.from(await file.data()), file.name));
+      }
+      if (!attachments.length) return;
+      if (token.isCancellationRequested || store !== this.host.store || doc.version !== version || doc.isClosed) throw new Error('导入时草稿发生变化或操作被取消，请重新拖入文件');
+      const prepared = store.prepareAttachments(key, attachments);
+      operation.placeholders = prepared.map(a => a.placeholder!);
+      return new vscode.DocumentDropEdit(prepared.map(a => a.placeholder).join(''), '作为 QQ 文件附件插入', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file'));
+    } catch (error) { await files.discard(attachments); throw error; }
+    finally {
+      // Let VS Code apply the returned drop edit before refreshing history.
+      const timer = setTimeout(() => { this.importTimers.delete(timer); if (this.importing.get(documentKey) === operation) { this.importing.delete(documentKey); this.schedule(key, true); } }, 250);
+      this.importTimers.add(timer);
     }
-    for (const uri of resources) {
-      const identity = process.platform === 'win32' ? uri.toString().toLowerCase() : uri.toString();
-      if (seen.has(identity)) continue;
-      seen.add(identity);
-      if (token.isCancellationRequested) return;
-      if (uri.scheme !== 'file') throw new Error('请从本机文件管理器拖入文件');
-      attachments.push(await files.stageFilePath(uri.fsPath, path.basename(uri.fsPath)));
-    }
-    for (const file of external.filter(f => !f.uri)) {
-      if (token.isCancellationRequested) return;
-      attachments.push(await files.stageFile(Buffer.from(await file.data()), file.name));
-    }
-    if (!attachments.length || token.isCancellationRequested || store !== this.host.store || doc.version !== version || doc.isClosed) return;
-    const prepared = store.prepareAttachments(key, attachments);
-    return new vscode.DocumentDropEdit(prepared.map(a => a.placeholder).join(''), '作为 QQ 文件附件插入', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file'));
   }
   async paste(doc: vscode.TextDocument, ranges: readonly vscode.Range[], data: vscode.DataTransfer, token: vscode.CancellationToken): Promise<vscode.DocumentPasteEdit[] | undefined> {
     const key = this.host.transcript?.key(doc.uri), region = this.region(doc), store = this.host.store, files = this.host.attachments;
@@ -266,6 +286,7 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     return [new vscode.DocumentPasteEdit(prepared.map(a => a.placeholder).join(''), '作为 QQ 图片占位符粘贴', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'image'))];
   }
   dispose(): void {
+    for (const timer of this.importTimers) clearTimeout(timer); this.importing.clear();
     clearTimeout(this.timer); for (const timer of this.saveTimers.values()) clearTimeout(timer);
     this.events.dispose(); this.buffers.clear();
   }

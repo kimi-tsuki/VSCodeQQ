@@ -10,15 +10,16 @@ export interface Chat {
   remark?: string; nickname?: string;
 }
 export interface ImageRef { file: string; url?: string; }
-export type Segment = { type: 'text'; text: string } | { type: 'image'; image: ImageRef };
+export interface FileRef { id: string; name: string; url?: string; busid?: number; size?: number; }
+export type Segment = { type: 'text'; text: string; file?: FileRef } | { type: 'image'; image: ImageRef };
 export interface Message {
   id: string; chatKey: string; senderId: string; senderName: string;
-  time: number; segments: Segment[]; replyId?: string; mentioned: boolean;
+  time: number; segments: Segment[]; replyId?: string; mentioned: boolean; replyToSelf?: boolean;
   senderTitle?: string; senderRole?: string;
   senderRemark?: string; senderNickname?: string;
-  sendState?: 'queued' | 'sending' | 'sent' | 'failed' | 'uncertain';
+  sendState?: 'queued' | 'sending' | 'sent' | 'failed' | 'uncertain' | 'cancelled';
   sendError?: string;
-  sendProgress?: { stage: 'upload' | 'confirm'; sent: number; total: number };
+  sendProgress?: { stage: 'upload' | 'confirm'; sent: number; total: number; bytesPerSecond?: number };
   outgoing?: Draft;
   localImages?: Attachment[];
   fileIds?: string[];
@@ -97,7 +98,8 @@ export function parseMessage(raw: any, key?: string, selfId = ''): Message {
     switch (part.type) {
       case 'text': result.segments.push({ type: 'text', text: String(data.text ?? '').replace(/\r\n?/g, '\n').replace(/\0/g, '') }); break;
       case 'file': {
-        result.segments.push({ type: 'text', text: `[文件:${inline(data.name || data.file_name || '文件')}]` });
+        const name = inline(data.name || data.file_name || '文件');
+        result.segments.push({ type: 'text', text: `[文件:${name}]`, file: { id: id(data.file_id ?? data.file), name, url: typeof data.url === 'string' ? data.url : undefined, busid: Number(data.busid ?? data.bus_id) || undefined, size: Number(data.size ?? data.file_size) || undefined } });
         const fileId = id(data.file_id ?? data.file); if (fileId) (result.fileIds ??= []).push(fileId);
         break;
       }
@@ -118,20 +120,23 @@ export function parseMessage(raw: any, key?: string, selfId = ''): Message {
   return result;
 }
 export const messageText = (message: Message): string => message.segments.map(s => s.type === 'text' ? s.text : '[图片]').join('');
+export const isPending = (m: Message): boolean => !!m.outgoing && !['sent', 'cancelled'].includes(m.sendState ?? '');
 export function mergeMessages(history: Message[], live: Message[], limit: number): Message[] {
   const values = new Map<string, Message>();
   for (const item of [...history, ...live]) values.set(item.id, item);
-  return [...values.values()].sort((a, b) => a.time - b.time).slice(-limit);
+  const sorted = [...values.values()].sort((a, b) => a.time - b.time);
+  const retained = sorted.filter(m => !isPending(m)).slice(-limit);
+  return [...retained, ...sorted.filter(isPending)].sort((a, b) => a.time - b.time);
 }
 
 export interface Span { line: number; start: number; end: number; messageId: string; imageIndex: number; }
-export interface Rendered { text: string; images: Span[]; actions: { line: number; start: number; messageId: string; kind: 'reply' | 'retry' }[]; messages: Map<number, string>; starts: Map<string, number>; ownLines: number[]; }
+export interface Rendered { text: string; images: Span[]; files: { line: number; start: number; end: number; messageId: string; fileIndex: number }[]; actions: { line: number; start: number; messageId: string; kind: 'reply' | 'retry' | 'cancel' }[]; messages: Map<number, string>; starts: Map<string, number>; ownLines: number[]; attentionLines: number[]; mentionLines: number[]; replyLines: number[]; }
 // Escape only the display projection; copy/reply/send continue using the original message.
 export const codeString = (text: string): string => JSON.stringify(text).slice(1, -1)
   .replace(/[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 export function renderTranscript(chat: Chat, messages: Message[], selfId: string): Rendered {
   const lines = [`#define CHAT_NAME "${codeString(chat.name)}"`, `#define ${chat.type === 'group' ? 'GROUP_ID' : 'FRIEND_ID'} "${chat.id}"`, '// 底部草稿 Enter 发送 · Shift/Ctrl+Enter 换行 · 右键回复 · 图片悬浮预览', ''];
-  const rendered: Rendered = { text: '', images: [], actions: [], messages: new Map(), starts: new Map(), ownLines: [] };
+  const rendered: Rendered = { text: '', images: [], files: [], actions: [], messages: new Map(), starts: new Map(), ownLines: [], attentionLines: [], mentionLines: [], replyLines: [] };
   const byId = new Map(messages.map(m => [m.id, m]));
   let lastDay = '';
   for (const m of messages) {
@@ -143,13 +148,13 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
     const stamp = Number.isFinite(date.getTime()) ? date.toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
     const self = m.senderId === selfId;
     const target = m.replyId ? byId.get(m.replyId) : undefined;
-    const tags = [self ? '我' : '', m.senderRole === 'owner' ? '群主' : m.senderRole === 'admin' ? '管理员' : '', !self && m.mentioned ? '@我' : '', !self && target?.senderId === selfId ? '回复我' : ''].filter(Boolean);
+    const tags = [self ? '我' : '', m.senderRole === 'owner' ? '群主' : m.senderRole === 'admin' ? '管理员' : '', !self && m.mentioned ? '@我' : '', !self && (m.replyToSelf || target?.senderId === selfId) ? '回复我' : ''].filter(Boolean);
     const sender = codeString(m.senderName);
-    let state = m.sendState ? ({ queued: '等待发送…', sending: '发送中…', sent: '✓ 已发送', failed: '发送失败 · [重试]', uncertain: '结果未确认 · [重试]' })[m.sendState] : '';
+    let state = m.sendState ? ({ queued: '等待发送…', sending: '发送中…', sent: '✓ 已发送', failed: '发送失败 · [重试]', uncertain: '结果未确认 · [重试]', cancelled: '已取消' })[m.sendState] : '';
     if (m.sendState === 'sending' && m.sendProgress) {
       const p = m.sendProgress, percent = p.total ? Math.min(100, Math.floor(p.sent / p.total * 100)) : 0;
       const filled = Math.floor(percent / 10);
-      state = p.stage === 'confirm' ? '文件已传至 NapCat · 等待 QQ 确认…' : `上传到 NapCat [${'█'.repeat(filled)}${'░'.repeat(10 - filled)}] ${percent}% · ${(p.sent / 1048576).toFixed(1)}/${(p.total / 1048576).toFixed(1)} MB`;
+      state = p.stage === 'confirm' ? '文件已传至 NapCat · 等待 QQ 确认…' : `上传到 NapCat [${'█'.repeat(filled)}${'░'.repeat(10 - filled)}] ${percent}% · ${(p.sent / 1048576).toFixed(1)}/${(p.total / 1048576).toFixed(1)} MB${p.bytesPerSecond ? ` · ${(p.bytesPerSecond / 1048576).toFixed(2)} MB/s` : ''}`;
     }
     lines.push(`#define INFO "${codeString(m.senderTitle || '')}" "${sender}" "${stamp}"`);
     const details: string[] = [];
@@ -162,12 +167,13 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
       lines.push(`    char replay[] = "${codeString(target ? `${target.senderName}：${messageText(target).slice(0, 160)}` : `回复消息 ${m.replyId}（未加载）`)}";`);
     }
     let current = '    char msg[] = "';
-    let imageIndex = 0;
+    let imageIndex = 0, fileIndex = 0;
     for (const part of m.segments) {
       if (part.type === 'image') {
         rendered.images.push({ line: lines.length, start: current.length, end: current.length + 4, messageId: m.id, imageIndex: imageIndex++ });
         current += '[图片]';
       } else {
+        if (part.file) rendered.files.push({ line: lines.length, start: current.length, end: current.length + codeString(part.text).length, messageId: m.id, fileIndex: fileIndex++ });
         const parts = part.text.split('\n');
         current += codeString(parts[0]);
         for (const next of parts.slice(1)) { lines.push(current + '\\n"'); current = `                 "${codeString(next)}`; }
@@ -181,8 +187,11 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
     lines.push(current);
     const ending = `}${state ? `  // ${state}` : ''}`;
     if (ending.includes('[重试]')) rendered.actions.push({ line: lines.length, start: ending.indexOf('[重试]'), messageId: m.id, kind: 'retry' });
-    lines.push(ending);
-    for (let line = start; line < lines.length; line++) { rendered.messages.set(line, m.id); if (self) rendered.ownLines.push(line); }
+    const cancellable = m.sendState === 'queued' || (m.sendState === 'sending' && m.sendProgress?.stage === 'upload');
+    const footer = ending + (cancellable ? ' · [取消]' : '');
+    if (cancellable) rendered.actions.push({ line: lines.length, start: footer.indexOf('[取消]'), messageId: m.id, kind: 'cancel' });
+    lines.push(footer);
+    for (let line = start; line < lines.length; line++) { rendered.messages.set(line, m.id); if (self) rendered.ownLines.push(line); else if (m.mentioned || m.replyToSelf || target?.senderId === selfId) { rendered.attentionLines.push(line); (m.mentioned ? rendered.mentionLines : rendered.replyLines).push(line); } }
     lines.push('');
   }
   if (!messages.length) lines.push('// 暂无消息，正在读取历史或等待新消息。');

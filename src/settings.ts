@@ -7,9 +7,10 @@ export class ConnectionSettings implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
   private busy = false;
   private probe?: OneBotClient;
-  constructor(private context: vscode.ExtensionContext, private config: Configuration, private connect: () => Promise<void>) {}
+  constructor(private context: vscode.ExtensionContext, private config: Configuration, private connect: () => Promise<void>, private cacheInfo: () => Promise<{ bytes: number; count: number }>, private cleanCache: () => Promise<number>) {}
   async state() {
-    return { url: this.config.url, hasToken: !!await this.config.token(), autoConnect: vscode.workspace.getConfiguration('qq').get('autoConnect', true) };
+    const settings = vscode.workspace.getConfiguration('qq');
+    return { historyCount: settings.get('historyCount', 50), messageLimit: settings.get('messageLimit', 500), notifications: settings.get('notifications', 'all'), cacheRetentionDays: settings.get('cacheRetentionDays', 7), mentionColor: settings.get('mentionColor', '#E5A030'), replyColor: settings.get('replyColor', '#409CFF'), cache: await this.cacheInfo(), url: this.config.url, hasToken: !!await this.config.token(), autoConnect: vscode.workspace.getConfiguration('qq').get('autoConnect', true) };
   }
   open(): void {
     if (this.panel) { this.panel.reveal(); return; }
@@ -25,6 +26,14 @@ export class ConnectionSettings implements vscode.Disposable {
       <label for="token">Access Token</label><input id="token" type="password" autocomplete="new-password" placeholder="未启用鉴权可留空" aria-describedby="tokenHelp"><p class="help" id="tokenHelp">Token 保存在 VS Code 安全存储中，不写入 settings.json。</p>
       <label class="check"><input id="clearToken" type="checkbox">清除已保存的 Token</label>
       <label class="check"><input id="autoConnect" type="checkbox">打开 QQ 视图时自动连接</label>
+      <hr><h2>聊天与提醒</h2>
+      <label for="historyCount">首次加载历史条数</label><input id="historyCount" type="number" min="10" max="500" required>
+      <label for="messageLimit">每个会话历史上限（未完成发送单独保留）</label><input id="messageLimit" type="number" min="50" max="2000" required>
+      <label for="notifications">弹窗提醒</label><select id="notifications"><option value="all">允许提醒的所有新消息</option><option value="mentions">仅 @我和回复我</option><option value="off">关闭弹窗（保留未读与高亮）</option></select>
+      <label for="mentionColor">@我高亮颜色</label><input id="mentionColor" type="color">
+      <label for="replyColor">回复我高亮颜色</label><input id="replyColor" type="color"><p class="help">使用淡色背景和左侧色条，同时 @我和回复我时优先显示 @我颜色。</p>
+      <h2>附件缓存</h2><label for="cacheRetentionDays">无引用附件保留天数</label><input id="cacheRetentionDays" type="number" min="1" max="90" required>
+      <p id="cacheInfo" class="help"></p><button type="button" id="cleanCache" class="secondary">清理无用附件缓存</button><p class="help">保护草稿、撤销记录、发送队列和历史图片；最近一小时导入的附件暂不清理。</p>
       <div class="actions"><button type="submit" id="connect">保存并连接</button><button type="button" id="save" class="secondary">仅保存</button><button type="button" id="test" class="secondary">测试连接</button></div>
       <div class="import"><button type="button" id="import" class="secondary">导入 tuiqq 配置</button><span class="help">选择现有的 config.json。</span></div>
       </fieldset></form><p id="result" role="status" aria-live="polite">正在读取设置…</p>
@@ -38,10 +47,13 @@ export class ConnectionSettings implements vscode.Disposable {
   }
   async handle(data: any): Promise<any> {
     if (data?.action === 'ready') return { state: await this.state() };
-    if (!['save', 'connect', 'test', 'import'].includes(data?.action)) throw new Error('未知设置操作');
+    if (!['save', 'connect', 'test', 'import', 'cleanCache'].includes(data?.action)) throw new Error('未知设置操作');
     if (this.busy) throw new Error('请等待当前操作完成');
     this.busy = true;
     try {
+      if (data.action === 'cleanCache') {
+        const bytes = await this.cleanCache(); return { state: await this.state(), message: `已清理 ${(bytes / 1048576).toFixed(1)} MB 无用附件缓存。` };
+      }
       if (data.action === 'import') {
         const imported = await this.config.import();
         return { state: await this.state(), message: imported ? '配置已导入，点击“保存并连接”应用。' : '已取消导入。' };
@@ -58,12 +70,21 @@ export class ConnectionSettings implements vscode.Disposable {
           return { message: `连接成功：${String(info.nickname || 'QQ')}（${info.user_id}）` };
         } finally { probe.dispose(); if (this.probe === probe) this.probe = undefined; }
       }
+      const updates: [string, unknown][] = [];
+      for (const [key, min, max] of [['historyCount', 10, 500], ['messageLimit', 50, 2000], ['cacheRetentionDays', 1, 90]] as const) {
+        if (data[key] !== undefined) { if (!Number.isInteger(data[key]) || data[key] < min || data[key] > max) throw new Error(`${key} 必须为 ${min}～${max} 的整数`); updates.push([key, data[key]]); }
+      }
+      for (const key of ['mentionColor', 'replyColor']) if (data[key] !== undefined) {
+        if (typeof data[key] !== 'string' || !/^#[0-9a-f]{6}$/i.test(data[key])) throw new Error('高亮颜色格式无效'); updates.push([key, data[key]]);
+      }
+      if (data.notifications !== undefined) { if (!['all', 'mentions', 'off'].includes(data.notifications)) throw new Error('提醒设置无效'); updates.push(['notifications', data.notifications]); }
       await this.config.saveConnection(url, token, data.autoConnect);
+      for (const [key, value] of updates) await vscode.workspace.getConfiguration('qq').update(key, value, vscode.ConfigurationTarget.Global);
       if (data.action === 'connect') {
         try { await this.connect(); }
         catch (error: any) { return { state: await this.state(), error: `配置已保存，但连接失败：${error.message}` }; }
       }
-      return { state: await this.state(), message: data.action === 'connect' ? '配置已保存，QQ 已连接。' : '配置已保存；当前连接保持不变，下次连接时应用。' };
+      return { state: await this.state(), message: data.action === 'connect' ? '配置已保存，QQ 已连接。' : '配置已保存；聊天设置已生效，连接参数在下次连接时应用。' };
     } finally { this.busy = false; }
   }
   dispose(): void { this.probe?.dispose(); this.panel?.dispose(); }

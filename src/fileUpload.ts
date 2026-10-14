@@ -12,7 +12,7 @@ export async function uploadToNapCat(client: OneBotClient, source: string,
     if (!size) throw new Error('不能发送空文件');
     const stream_id = randomUUID(), chunkSize = 512 * 1024, total_chunks = Math.ceil(size / chunkSize);
     const buffer = Buffer.allocUnsafe(chunkSize);
-    let sent = 0;
+    let sent = 0; const started = Date.now();
     progress({ stage: 'upload', sent, total: size });
     for (let index = 0; index < total_chunks; index++) {
       check();
@@ -28,7 +28,7 @@ export async function uploadToNapCat(client: OneBotClient, source: string,
         total_chunks, file_size: size, filename: `qq-${stream_id}.attachment`, file_retention: 3600000
       }, 120000);
       if (result?.status !== 'chunk_received' || result.received_chunks !== index + 1) throw new Error('NapCat 未确认文件分片，请检查版本是否支持上传文件流');
-      sent += length; progress({ stage: 'upload', sent, total: size });
+      sent += length; progress({ stage: 'upload', sent, total: size, bytesPerSecond: sent / Math.max(0.001, (Date.now() - started) / 1000) });
     }
     check();
     const result = await client.call('upload_file_stream', { stream_id, is_complete: true }, 300000);
