@@ -232,3 +232,41 @@ test('最近表情按使用顺序去重，最多保留十个', async () => {
   items = rememberEmoji(items, { id: '5', kind: 'face', label: 'five', faceId: '5' });
   assert.equal(items.length, 10); assert.equal(items[0].id, '5'); assert.equal(items.filter(e => e.id === '5').length, 1);
 });
+
+test('文件占位符：删除不发送、同名不冲突、文件与文字按原顺序拆分', async () => {
+  const { outgoingDrafts } = await import('../src/model');
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-files-'));
+  const store = new ChatStore(folder, '123');
+  try {
+    store.upsert(newChat('group', '1', '群'));
+    const first = { id: 'a', kind: 'file' as const, label: '报告.pdf', size: 10 };
+    const second = { ...first, id: 'b' };
+    const prepared = store.prepareAttachments('group:1', [first, second]);
+    assert.deepEqual(prepared.map(a => a.placeholder), ['[文件:报告.pdf]', '[文件:报告.pdf (2)]']);
+    assert.deepEqual(draftParts('删掉附件', prepared), ['删掉附件']);
+    assert.throws(() => draftParts('[文件:不存在.txt]', prepared), /没有对应附件/);
+    const draft = { text: '前[文件:报告.pdf]中[文件:报告.pdf (2)]后', version: 1, attachments: prepared };
+    assert.deepEqual(outgoingDrafts(draft).map(d => d.text), ['前','[文件:报告.pdf]','中','[文件:报告.pdf (2)]','后']);
+  } finally { await store.flush(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('分块上传超过 16 MB 文件，字节完整且进度基于分片回执', async () => {
+  const { uploadToNapCat } = await import('../src/fileUpload');
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-upload-'));
+  const backend = new MockNapCat(); await backend.start();
+  const client = new OneBotClient();
+  try {
+    const file = path.join(folder, 'large.bin'), bytes = Buffer.alloc(17 * 1024 * 1024 + 37, 73);
+    await fs.writeFile(file, bytes); await client.connect(backend.url);
+    const values: number[] = [];
+    const remote = await uploadToNapCat(client, file, p => values.push(p.sent));
+    assert.deepEqual(backend.uploadedBytes.get(remote), bytes);
+    assert.equal(values[0], 0); assert.equal(values.at(-1), bytes.length);
+    assert.ok(values.every((n, i) => !i || n >= values[i-1]));
+    const chunks = backend.calls.filter(c => c.action === 'upload_file_stream' && c.params.chunk_data);
+    assert.ok(chunks.length > 32);
+    assert.ok(chunks.every(c => Buffer.from(c.params.chunk_data, 'base64').length <= 512 * 1024));
+    assert.equal(backend.fileUploads.length, 0);
+    await assert.rejects(uploadToNapCat(client, file, () => {}, () => { throw new Error('账号已切换'); }), /账号已切换/);
+  } finally { client.dispose(); await backend.close(); await fs.rm(folder, { recursive: true, force: true }); }
+});

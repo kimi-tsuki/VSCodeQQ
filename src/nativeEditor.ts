@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { Attachment, codeString, inline, messageText } from './model';
+import * as path from 'node:path';
+import { attachmentPattern, Attachment, codeString, inline, messageText } from './model';
 import { ChatStore } from './store';
 import { Transcript } from './transcript';
 import { AttachmentFiles } from './attachments';
@@ -185,7 +186,7 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
   private attachmentAt(doc: vscode.TextDocument, pos: vscode.Position): { attachment: Attachment; range: vscode.Range } | undefined {
     const key = this.host.transcript?.key(doc.uri), region = this.region(doc);
     if (!key || !region || doc.offsetAt(pos) < region.start) return;
-    for (const match of region.text.matchAll(/\[(?:图片|表情):\d+\]/g)) {
+    for (const match of region.text.matchAll(attachmentPattern)) {
       const start = region.start + match.index!;
       const range = new vscode.Range(doc.positionAt(start), doc.positionAt(start + match[0].length));
       const attachment = this.host.store?.draft(key).attachments.find(a => a.placeholder === match[0]);
@@ -200,6 +201,7 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
       md.supportHtml = true;
       md.appendMarkdown(`\n\n${imagePreviewMarkup(item.attachment.file, bytes, doc)}`);
     }
+    if (item.attachment.kind === 'file') md.appendText(`\n大小：${(item.attachment.size ?? 0).toLocaleString()} 字节\nEnter 发送；删除占位符可取消附件`);
     return new vscode.Hover(md, item.range);
   }
   links(doc: vscode.TextDocument): vscode.DocumentLink[] {
@@ -213,6 +215,41 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
       }
     }
     return result;
+  }
+  async drop(doc: vscode.TextDocument, position: vscode.Position, data: vscode.DataTransfer, token: vscode.CancellationToken): Promise<vscode.DocumentDropEdit | undefined> {
+    const key = this.host.transcript?.key(doc.uri), region = this.region(doc), store = this.host.store, files = this.host.attachments;
+    if (!key || !region || !store || !files || doc.offsetAt(position) < region.start) return;
+    const version = doc.version;
+    const attachments: Attachment[] = [], seen = new Set<string>();
+    const normalize = (value: string | vscode.Uri): vscode.Uri => {
+      if (typeof value === 'string' && /^[a-z]:[\\/]/i.test(value)) return vscode.Uri.file(value);
+      const uri = typeof value === 'string' ? vscode.Uri.parse(value) : value;
+      // Electron can expose a Windows OS file path as a drive-letter URI.
+      return /^[a-z]$/i.test(uri.scheme) && /^[\\/]/.test(uri.path) ? vscode.Uri.file(uri.scheme + ':' + uri.path) : uri;
+    };
+    const uris = data.get('text/uri-list');
+    const resources: vscode.Uri[] = uris ? (await uris.asString()).split(/\r?\n/).filter(s => s && !s.startsWith('#')).map(s => normalize(s)) : [];
+    const external = [...data].map(([, item]) => item.asFile()).filter((f): f is vscode.DataTransferFile => !!f);
+    for (const file of external) if (file.uri) resources.push(normalize(file.uri));
+    if (resources.length + external.filter(f => !f.uri).length > 8) {
+      // The same file may be offered as both a URI and an OS file entry.
+      if (new Set(resources.map(u => u.toString())).size + external.filter(f => !f.uri).length > 8) throw new Error('每条消息最多附带 8 个附件');
+    }
+    for (const uri of resources) {
+      const identity = process.platform === 'win32' ? uri.toString().toLowerCase() : uri.toString();
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      if (token.isCancellationRequested) return;
+      if (uri.scheme !== 'file') throw new Error('请从本机文件管理器拖入文件');
+      attachments.push(await files.stageFilePath(uri.fsPath, path.basename(uri.fsPath)));
+    }
+    for (const file of external.filter(f => !f.uri)) {
+      if (token.isCancellationRequested) return;
+      attachments.push(await files.stageFile(Buffer.from(await file.data()), file.name));
+    }
+    if (!attachments.length || token.isCancellationRequested || store !== this.host.store || doc.version !== version || doc.isClosed) return;
+    const prepared = store.prepareAttachments(key, attachments);
+    return new vscode.DocumentDropEdit(prepared.map(a => a.placeholder).join(''), '作为 QQ 文件附件插入', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file'));
   }
   async paste(doc: vscode.TextDocument, ranges: readonly vscode.Range[], data: vscode.DataTransfer, token: vscode.CancellationToken): Promise<vscode.DocumentPasteEdit[] | undefined> {
     const key = this.host.transcript?.key(doc.uri), region = this.region(doc), store = this.host.store, files = this.host.attachments;

@@ -28,6 +28,12 @@ export class MockNapCat {
   emitSent = true;
   historyDelay = 0;
   failSend = false;
+  fileUploads: any[] = [];
+  fileDelay = 0;
+  failFileName = '';
+  streamDelay = 0;
+  streamChunks = new Map<string, Buffer[]>();
+  uploadedBytes = new Map<string, Buffer>();
   sequence = 9000;
   masks = new Map<string, number | null>([['20001', 1], ['20002', 1]]);
   async start(): Promise<void> {
@@ -56,6 +62,34 @@ export class MockNapCat {
         case 'get_msg':
           if (this.detailDelay) await new Promise(resolve => setTimeout(resolve, this.detailDelay));
           respond(this.sentMessages.get(Number(req.params.message_id))); break;
+        case 'upload_file_stream': {
+          if (this.streamDelay) await new Promise(resolve => setTimeout(resolve, this.streamDelay));
+          const p = req.params;
+          if (p.is_complete) {
+            const chunks = this.streamChunks.get(p.stream_id)!;
+            if (!chunks) { respond(null, 'failed'); break; }
+            const file_path = '/napcat/temp/' + p.stream_id;
+            const bytes = Buffer.concat(chunks); this.uploadedBytes.set(file_path, bytes);
+            this.streamChunks.delete(p.stream_id);
+            respond({ type: 'response', status: 'file_complete', file_path, file_size: bytes.length });
+          } else {
+            const chunks = this.streamChunks.get(p.stream_id) ?? [];
+            chunks[p.chunk_index] = Buffer.from(p.chunk_data, 'base64'); this.streamChunks.set(p.stream_id, chunks);
+            respond({ type: 'stream', status: 'chunk_received', received_chunks: chunks.filter(Boolean).length, total_chunks: p.total_chunks });
+          }
+          break;
+        }
+        case 'upload_group_file': case 'upload_private_file': {
+          this.fileUploads.push({ action: req.action, ...req.params });
+          if (this.fileDelay) await new Promise(resolve => setTimeout(resolve, this.fileDelay));
+          if (req.params.name === this.failFileName) respond(null, 'failed');
+          else {
+            const file_id = 'mock-file-' + this.fileUploads.length;
+            const event = { ...this.message(++this.sequence), post_type: 'message_sent', message_type: req.action === 'upload_group_file' ? 'group' : 'private', group_id: req.params.group_id, target_id: req.params.user_id, user_id: 123456, sender: { user_id: 123456, nickname: '我' }, message: [{ type: 'file', data: { file_id, name: req.params.name } }] };
+            this.emit(event); respond({ file_id });
+          }
+          break;
+        }
         case 'send_msg': {
           this.sent.push(req.params);
           if (this.sendDelay) await new Promise(resolve => setTimeout(resolve, this.sendDelay));

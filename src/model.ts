@@ -18,19 +18,22 @@ export interface Message {
   senderRemark?: string; senderNickname?: string;
   sendState?: 'queued' | 'sending' | 'sent' | 'failed' | 'uncertain';
   sendError?: string;
+  sendProgress?: { stage: 'upload' | 'confirm'; sent: number; total: number };
   outgoing?: Draft;
   localImages?: Attachment[];
+  fileIds?: string[];
 }
 export interface Member { id: string; name: string; title: string; role: string; nickname?: string; }
-export interface Attachment { id: string; kind: 'image' | 'face'; label: string; file?: string; faceId?: string; sticker?: boolean; placeholder?: string; }
+export interface Attachment { id: string; kind: 'image' | 'face' | 'file'; label: string; size?: number; file?: string; faceId?: string; sticker?: boolean; placeholder?: string; }
 export interface Draft { text: string; replyId?: string; version: number; attachments: Attachment[]; }
 export const emptyDraft = (): Draft => ({ text: '', version: 0, attachments: [] });
+export const attachmentPattern = /\[(?:(?:图片|表情):\d+|文件:[^\]\r\n]+)\]/g;
 export function draftParts(text: string, attachments: Attachment[]): (string | Attachment)[] {
   const parts: (string | Attachment)[] = []; let offset = 0, count = 0;
-  for (const match of text.matchAll(/\[(?:图片|表情):\d+\]/g)) {
+  for (const match of text.matchAll(attachmentPattern)) {
     const attachment = attachments.find(a => a.placeholder === match[0]);
     if (!attachment) throw new Error(`占位符 ${match[0]} 没有对应附件，请重新导入或删除它`);
-    if (++count > 8) throw new Error('每条消息最多发送 8 个图片或表情（含重复占位符）');
+    if (++count > 8) throw new Error('每条消息最多发送 8 个附件（含重复占位符）');
     if (match.index! > offset) parts.push(text.slice(offset, match.index));
     parts.push(attachment); offset = match.index! + match[0].length;
   }
@@ -38,6 +41,25 @@ export function draftParts(text: string, attachments: Attachment[]): (string | A
   // Compatibility with drafts saved by 0.1.0, before inline placeholders existed.
   parts.push(...attachments.filter(a => !a.placeholder));
   return parts;
+}
+// File uploads are independent operations so retries never resend successful neighbours.
+export function outgoingDrafts(draft: Draft): Draft[] {
+  const parts = draftParts(draft.text, draft.attachments);
+  if (!parts.some(p => typeof p !== 'string' && p.kind === 'file')) return [draft];
+  const result: Draft[] = []; let chunk: (string | Attachment)[] = [];
+  const flush = () => {
+    if (!chunk.length) return;
+    const text = chunk.map(p => typeof p === 'string' ? p : p.placeholder ?? '').join('');
+    const attachments = chunk.filter((p): p is Attachment => typeof p !== 'string');
+    if (text.trim() || attachments.length) result.push({ ...draft, text, attachments, replyId: result.length ? undefined : draft.replyId });
+    chunk = [];
+  };
+  for (const part of parts) {
+    if (typeof part !== 'string' && part.kind === 'file') {
+      flush(); result.push({ ...draft, text: part.placeholder ?? '', attachments: [part], replyId: undefined });
+    } else chunk.push(part);
+  }
+  flush(); return result;
 }
 export const inline = (text: unknown): string => String(text ?? '').replace(/[\r\n\t\u0000-\u0008\u000b-\u001f\u2028\u2029]/g, ' ');
 export function id(value: unknown): string { return typeof value === 'number' || typeof value === 'string' ? String(value) : ''; }
@@ -74,6 +96,11 @@ export function parseMessage(raw: any, key?: string, selfId = ''): Message {
     const data = part.data ?? {};
     switch (part.type) {
       case 'text': result.segments.push({ type: 'text', text: String(data.text ?? '').replace(/\r\n?/g, '\n').replace(/\0/g, '') }); break;
+      case 'file': {
+        result.segments.push({ type: 'text', text: `[文件:${inline(data.name || data.file_name || '文件')}]` });
+        const fileId = id(data.file_id ?? data.file); if (fileId) (result.fileIds ??= []).push(fileId);
+        break;
+      }
       case 'image': result.segments.push({ type: 'image', image: { file: String(data.file ?? data.file_id ?? ''), url: typeof data.url === 'string' ? data.url : undefined } }); break;
       case 'reply': result.replyId = id(data.id) || undefined; break;
       case 'at': {
@@ -118,7 +145,12 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
     const target = m.replyId ? byId.get(m.replyId) : undefined;
     const tags = [self ? '我' : '', m.senderRole === 'owner' ? '群主' : m.senderRole === 'admin' ? '管理员' : '', !self && m.mentioned ? '@我' : '', !self && target?.senderId === selfId ? '回复我' : ''].filter(Boolean);
     const sender = codeString(m.senderName);
-    const state = m.sendState ? ({ queued: '等待发送…', sending: '发送中…', sent: '✓ 已发送', failed: '发送失败 · [重试]', uncertain: '结果未确认 · [重试]' })[m.sendState] : '';
+    let state = m.sendState ? ({ queued: '等待发送…', sending: '发送中…', sent: '✓ 已发送', failed: '发送失败 · [重试]', uncertain: '结果未确认 · [重试]' })[m.sendState] : '';
+    if (m.sendState === 'sending' && m.sendProgress) {
+      const p = m.sendProgress, percent = p.total ? Math.min(100, Math.floor(p.sent / p.total * 100)) : 0;
+      const filled = Math.floor(percent / 10);
+      state = p.stage === 'confirm' ? '文件已传至 NapCat · 等待 QQ 确认…' : `上传到 NapCat [${'█'.repeat(filled)}${'░'.repeat(10 - filled)}] ${percent}% · ${(p.sent / 1048576).toFixed(1)}/${(p.total / 1048576).toFixed(1)} MB`;
+    }
     lines.push(`#define INFO "${codeString(m.senderTitle || '')}" "${sender}" "${stamp}"`);
     const details: string[] = [];
     if (m.senderRemark && m.senderRemark !== m.senderName) details.push(`备注：${inline(m.senderRemark)}`);

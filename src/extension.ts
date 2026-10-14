@@ -10,9 +10,10 @@ import { Composer } from './composer';
 import { Configuration } from './configuration';
 import { ConnectionSettings } from './settings';
 import { AttachmentFiles } from './attachments';
+import { uploadToNapCat } from './fileUpload';
 import { NotificationSync, allowsUnread } from './notifications';
 import { NativeEditor } from './nativeEditor';
-import { Attachment, Chat, Message, draftParts, id, messageText, newChat, parseMessage, splitKey } from './model';
+import { Attachment, Chat, Message, draftParts, outgoingDrafts, id, messageText, newChat, parseMessage, splitKey } from './model';
 
 type Anchor = { messageId?: string; offset: number; character: number; draftOffset?: number };
 type ViewSnapshot = { editor: vscode.TextEditor; follow: boolean; top: Anchor; selections: { anchor: Anchor; active: Anchor }[] };
@@ -94,6 +95,12 @@ export class QQApp implements vscode.Disposable {
     vscode.languages.registerDocumentPasteEditProvider(selector, {
       provideDocumentPasteEdits: (doc, ranges, data, _context, token) => this.native.paste(doc, ranges, data, token)
     }, { pasteMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'], providedPasteEditKinds: [vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'image')] }));
+    this.disposables.push(vscode.languages.registerDocumentDropEditProvider(selector, {
+      provideDocumentDropEdits: async (doc, position, data, token) => {
+        try { return await this.native.drop(doc, position, data, token); }
+        catch (error: any) { void vscode.window.showErrorMessage(`QQ 文件导入失败：${error.message}`); return new vscode.DocumentDropEdit('', '文件未导入', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file')); }
+      }
+    }, { dropMimeTypes: ['text/uri-list', 'files'], providedDropEditKinds: [vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file')] }));
     for (const section of ['list', 'favorites'] as Section[]) {
       const provider = new ChatTree(section, () => this.store); this.trees.push(provider);
       const view = vscode.window.createTreeView(`qq.${section}`, { treeDataProvider: provider, showCollapseAll: false });
@@ -214,6 +221,10 @@ export class QQApp implements vscode.Disposable {
         const key = splitKey(message.chatKey);
         store.upsert(newChat(key.type, key.id, key.type === 'private' ? message.senderName : key.id));
       }
+      if (message.senderId === store.selfId && message.fileIds?.length) {
+        const local = store.messages.get(message.chatKey)?.find(m => m.id.startsWith('local:') && m.fileIds?.some(f => message.fileIds!.includes(f)));
+        if (local) { store.settleOutgoing(message.chatKey, local.id, { ...local, ...message }); return; }
+      }
       const added = store.add(message, true);
       if (added && message.senderId !== store.selfId) void this.notifyMessage(store, message);
       if (added && message.senderId !== store.selfId && vscode.window.visibleTextEditors.some(e => this.transcript?.key(e.document.uri) === message.chatKey && this.following.get(e) === false)) {
@@ -305,21 +316,25 @@ export class QQApp implements vscode.Disposable {
     if (replyId && (!/^-?\d+$/.test(replyId) || replyId === '0')) throw new Error('这条消息暂时无法引用');
     const draft = store.draft(key);
     const captured = draft.text === text && draft.replyId === replyId ? draft : store.setDraft(key, text, replyId);
-    const parts = draftParts(text, captured.attachments);
-    const local: Message = {
-      id: `local:${randomUUID()}`, chatKey: key, senderId: store.selfId, senderName: '我',
-      time: Math.floor(Date.now() / 1000), mentioned: false, replyId,
-      sendState: this.sendQueues.has(pendingKey) ? 'queued' : 'sending', outgoing: captured,
-      localImages: parts.filter((p): p is Attachment => typeof p !== 'string' && p.kind === 'image'),
-      segments: parts.map(p => typeof p === 'string' ? { type: 'text' as const, text: p } : p.kind === 'image' ? { type: 'image' as const, image: { file: '' } } : { type: 'text' as const, text: `[表情:${p.faceId}]` })
-    };
+    const drafts = outgoingDrafts(captured);
     this.submitting.add(pendingKey);
-    store.add(local, false);
+    const tasks: Promise<boolean>[] = [];
+    for (const outgoing of drafts) {
+      const parts = draftParts(outgoing.text, outgoing.attachments);
+      const local: Message = {
+        id: `local:${randomUUID()}`, chatKey: key, senderId: store.selfId, senderName: '我',
+        time: Math.floor(Date.now() / 1000), mentioned: false, replyId: outgoing.replyId,
+        sendState: this.sendQueues.has(pendingKey) ? 'queued' : 'sending', outgoing,
+        localImages: parts.filter((p): p is Attachment => typeof p !== 'string' && p.kind === 'image'),
+        segments: parts.map(p => typeof p === 'string' ? { type: 'text' as const, text: p } : p.kind === 'image' ? { type: 'image' as const, image: { file: '' } } : { type: 'text' as const, text: p.kind === 'file' ? p.placeholder ?? `[文件:${p.label}]` : `[表情:${p.faceId}]` })
+      };
+      store.add(local, false);
+      tasks.push(this.queueOutgoing(store, local));
+    }
     store.completeSend(key, captured);
-    const task = this.queueOutgoing(store, local);
     try { await this.syncOutgoing(store, key, true); }
     finally { this.submitting.delete(pendingKey); }
-    return task;
+    return (await Promise.all(tasks)).every(Boolean);
   }
   private async syncOutgoing(store: ChatStore, key: string, follow = false): Promise<void> {
     if (store !== this.store) return;
@@ -338,11 +353,33 @@ export class QQApp implements vscode.Disposable {
       let requested = false;
       try {
         if (store !== this.store || epoch !== this.epoch || !this.ready) throw new Error('连接已变化，消息尚未提交');
-        message.sendState = 'sending'; message.sendError = undefined; store.enrichMessage(message);
+        message.sendState = 'sending'; message.sendError = undefined; message.sendProgress = undefined; store.enrichMessage(message);
         await store.flush();
         const draft = message.outgoing!;
         const parts = draftParts(draft.text, draft.attachments);
         const used = parts.filter((p): p is Attachment => typeof p !== 'string');
+        const file = used.find(a => a.kind === 'file');
+        if (file && files) {
+          const source = await files.filePath(file);
+          const check = () => { if (store !== this.store || epoch !== this.epoch || !this.ready) throw new Error('连接已变化，上传已暂停'); };
+          let lastUpdate = 0;
+          const remote = await uploadToNapCat(this.client, source, progress => {
+            check(); message.sendProgress = progress;
+            if (Date.now() - lastUpdate > 200 || progress.stage === 'confirm') { lastUpdate = Date.now(); store.enrichMessage(message); }
+          }, check);
+          check();
+          const chat = splitKey(message.chatKey);
+          requested = true;
+          const result = await this.client.call(chat.type === 'group' ? 'upload_group_file' : 'upload_private_file', {
+            [chat.type === 'group' ? 'group_id' : 'user_id']: chat.id, file: remote, name: file.label
+          }, 30 * 60 * 1000);
+          message.sendProgress = undefined;
+          message.fileIds = result?.file_id ? [String(result.file_id)] : undefined;
+          store.settleOutgoing(message.chatKey, message.id, { ...message, id: id(result?.message_id) || message.id });
+          await store.flush();
+          await this.syncOutgoing(store, message.chatKey).catch(error => this.log(error));
+          return true;
+        }
         const media = files ? await files.segments(used) : [];
         if (store !== this.store || epoch !== this.epoch || !this.ready) throw new Error('连接已变化，消息尚未提交');
         const segments: unknown[] = draft.replyId ? [{ type: 'reply', data: { id: draft.replyId } }] : [];

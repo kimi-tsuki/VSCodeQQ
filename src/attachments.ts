@@ -23,10 +23,32 @@ export class AttachmentFiles {
     await fs.writeFile(file, bytes);
     return { id, kind: 'image', label, file, sticker };
   }
+  async stageFile(bytes: Buffer, name: string): Promise<Attachment> {
+    const label = name.split(/[\\/]/).pop()?.replace(/[\r\n\0]/g, ' ') || '文件';
+    const id = randomUUID(), file = path.join(this.folder, id + '.attachment');
+    await fs.mkdir(this.folder, { recursive: true });
+    await fs.writeFile(file, bytes);
+    return { id, kind: 'file', label, file, size: bytes.length };
+  }
+  async stageFilePath(source: string, name: string): Promise<Attachment> {
+    const stat = await fs.stat(source);
+    if (!stat.isFile()) throw new Error('请拖入文件，文件夹请先压缩');
+    if (!stat.size) throw new Error('不能发送空文件');
+    const id = randomUUID(), file = path.join(this.folder, id + '.attachment');
+    await fs.mkdir(this.folder, { recursive: true });
+    await fs.copyFile(source, file);
+    const size = (await fs.stat(file)).size;
+    return { id, kind: 'file', label: name, file, size };
+  }
+  async filePath(attachment: Attachment): Promise<string> {
+    if (!attachment.file || path.dirname(path.resolve(attachment.file)) !== path.resolve(this.folder)) throw new Error('附件路径无效');
+    if (!(await fs.stat(attachment.file)).isFile()) throw new Error('附件缓存已失效');
+    return attachment.file;
+  }
   async read(attachment: Attachment): Promise<Buffer> {
-    if (!attachment.file || path.dirname(path.resolve(attachment.file)) !== path.resolve(this.folder)) throw new Error('图片附件路径无效');
+    if (!attachment.file || path.dirname(path.resolve(attachment.file)) !== path.resolve(this.folder)) throw new Error('附件路径无效');
     const stat = await fs.stat(attachment.file);
-    if (stat.size > 16 * 1024 * 1024) throw new Error('图片附件过大');
+    if (stat.size > 16 * 1024 * 1024) throw new Error('附件过大');
     return fs.readFile(attachment.file);
   }
   async segments(attachments: Attachment[]): Promise<unknown[]> {
@@ -37,6 +59,7 @@ export class AttachmentFiles {
         if (!basicFaces.some(face => face.id === attachment.faceId)) throw new Error('无效的 QQ 表情');
         segments.push({ type: 'face', data: { id: attachment.faceId } });
       } else {
+        if (attachment.kind === 'file') throw new Error('文件必须通过文件上传接口发送');
         const bytes = await this.read(attachment); size += bytes.length;
         if (size > 16 * 1024 * 1024) throw new Error('单条消息的图片总大小不能超过 16 MB');
         segments.push({ type: 'image', data: { file: `base64://${bytes.toString('base64')}`, ...(attachment.sticker ? { sub_type: 1 } : {}) } });

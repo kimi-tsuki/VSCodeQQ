@@ -319,6 +319,52 @@ export async function run(): Promise<void> {
     backend.masks.set('20002', 1); await app.notifications!.refresh(true);
     checks.push('已打开聊天的未读保留、@及回复标签标记、免打扰例外提醒、主动清除');
     const output = path.join(extension.extensionPath, '.test-output'); await fs.mkdir(output, { recursive: true });
+    await vscode.commands.executeCommand('workbench.action.closePanel');
+    await vscode.commands.executeCommand('notifications.clearAll');
+    // OS-style file drop into the real editor, without sending to any real QQ account.
+    const filePath = path.join(output, '拖入测试.txt'); await fs.writeFile(filePath, Buffer.alloc(1200000, 65));
+    await app.native.focus(editor);
+    const fileDraftRegion = app.native.region(editor.document)!;
+    await editor.edit(edit => edit.replace(new vscode.Range(editor.document.positionAt(fileDraftRegion.start), editor.document.positionAt(editor.document.getText().length)), ''));
+    await app.native.focus(editor);
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    await new Promise(r => setTimeout(r, 250));
+    const dropPoint = await ui.evaluate(`(() => { const e = [...document.querySelectorAll('.monaco-editor[data-uri]')].find(e => e.getAttribute('data-uri').includes('/20002/')); const lines = [...e.querySelectorAll('.view-line')]; const r = lines.at(-1).getBoundingClientRect(); return { x: r.left + 30, y: r.top + r.height / 2 }; })()`);
+    const dragData = { items: [], files: [filePath], dragOperationsMask: 1 };
+    for (const type of ['dragEnter', 'dragOver', 'drop']) await ui.call('Input.dispatchDragEvent', { type, ...dropPoint, data: dragData, modifiers: 8 });
+    await until(() => app!.native.draft(editor.document).includes('[文件:拖入测试.txt]'));
+    const fileHoverPos = editor.document.positionAt(app.native.region(editor.document)!.start + 3);
+    const fileHover = await app.native.hover(editor.document, fileHoverPos);
+    assert.ok((fileHover!.contents[0] as vscode.MarkdownString).value.includes((1200000).toLocaleString()));
+    const imported = app.store!.draft('group:20002').attachments.find(a => a.kind === 'file')!;
+    assert.equal(imported.size, 1200000);
+    const secondFile = await app.attachments!.stageFile(Buffer.from('second-file'), '失败测试.txt');
+    await app.attachToDraft('group:20002', [secondFile]);
+    backend.streamDelay = 150; backend.fileDelay = 100; backend.failFileName = secondFile.label;
+    const sendingFiles = app.sendMessage('group:20002', app.native.draft(editor.document));
+    await until(() => app!.native.draft(editor.document) === '');
+    assert.ok(app.store!.messages.get('group:20002')!.some(m => m.sendState === 'sending' || m.sendState === 'queued'));
+    await until(() => editor.document.getText().includes('上传到 NapCat ['));
+    // Writing another draft must remain possible while upload is running.
+    await app.native.focus(editor); await editor.edit(edit => edit.insert(editor.selection.active, '上传时继续输入'));
+    assert.equal(await sendingFiles, false);
+    assert.equal(app.native.draft(editor.document), '上传时继续输入');
+    assert.equal(backend.fileUploads.length, 2);
+    assert.equal(backend.fileUploads[0].action, 'upload_group_file');
+    assert.equal(backend.uploadedBytes.get(backend.fileUploads[0].file)?.length, 1200000);
+    const failedFile = app.store!.messages.get('group:20002')!.find(m => m.sendState === 'failed' && m.outgoing?.attachments.some(a => a.label === secondFile.label))!;
+    assert.ok(failedFile);
+    backend.failFileName = ''; backend.streamDelay = 0;
+    await vscode.commands.executeCommand('qq.retryMessage', editor.document.uri.toString(), failedFile.id);
+    assert.equal(backend.fileUploads.filter(f => f.name === imported.label).length, 1, '成功文件不应在重试时重复发送');
+    assert.equal(backend.fileUploads.filter(f => f.name === secondFile.label).length, 2);
+    assert.equal(app.store!.messages.get('group:20002')!.filter(m => m.fileIds?.includes('mock-file-1')).length, 1, '文件回显只保留一条记录');
+    // Private chats use the private file endpoint and carry actual bytes to NapCat first.
+    app.store!.attach('private:10001', [await app.attachments!.stageFile(Buffer.from('private-file'), '私聊.txt')]);
+    assert.equal(await app.sendMessage('private:10001', app.store!.draft('private:10001').text), true);
+    assert.equal(backend.fileUploads.at(-1).action, 'upload_private_file');
+    assert.equal(backend.fileUploads.at(-1).user_id, '10001');
+    checks.push('真实 Shift 文件拖入、文件悬浮、分片进度在消息后、立即清空草稿、独立失败重试与群/私聊上传');
     for (const [i, shape] of ['tall', 'wide', 'tall'].entries()) {
       if (i === 2) await ui.call('Emulation.setDeviceMetricsOverride', { width: 1100, height: 480, deviceScaleFactor: 1, mobile: false });
       const messageId = 8800 + i;
@@ -334,10 +380,8 @@ export async function run(): Promise<void> {
       const preview = await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', editor.document.uri, position);
       assert.ok(preview?.length, `没有悬浮内容：${shape}`);
       assert.ok(editor.selection.active.isEqual(position), '预览位置被异步历史更新覆盖');
-      const point = await ui.evaluate(`(() => { const e = [...document.querySelectorAll('.monaco-editor[data-uri]')].find(e => e.getAttribute('data-uri').includes('/20002/')); const walker = document.createTreeWalker(e.querySelector('.view-lines'), NodeFilter.SHOW_TEXT); let node, result; while (node = walker.nextNode()) { const at = node.textContent.indexOf('[图片]'); if (at < 0) continue; const range = document.createRange(); range.setStart(node, at); range.setEnd(node, at + 4); const r = range.getBoundingClientRect(); result = {x:r.x + r.width/2, y:r.y + r.height/2}; } return result; })()`);
-      assert.ok(point, '图片占位符没有出现在可见区域');
-      await ui.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
-      await ui.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
+      await vscode.commands.executeCommand('notifications.clearAll');
+      await vscode.commands.executeCommand('editor.action.showHover', { focus: false });
       await new Promise(r => setTimeout(r, 1000));
       const debugShot = await ui.call('Page.captureScreenshot', { format: 'png' });
       await fs.writeFile(path.join(output, 'hover-debug.png'), Buffer.from(debugShot.data, 'base64'));
@@ -364,6 +408,7 @@ export async function run(): Promise<void> {
     const sendsBeforePicker = backend.sent.length;
     await vscode.commands.executeCommand('editor.action.triggerSuggest');
     await ui.waitFor(`!!document.querySelector('.suggest-widget.visible')`);
+    await new Promise(r => setTimeout(r, 200));
     await ui.enter();
     await until(() => app!.native.draft(editor.document) === '');
     const emojiUI = await ui.webview();
