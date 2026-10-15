@@ -170,7 +170,8 @@
       },
       {
         "command": "qq.cancelReply",
-        "title": "QQ: 取消回复"
+        "title": "QQ: 取消回复",
+        "icon": "$(close)"
       },
       {
         "command": "qq.newline",
@@ -304,7 +305,8 @@
         },
         {
           "command": "qq.cancelReply",
-          "when": "resourceScheme == qqchat"
+          "when": "resourceScheme == qqchat && qq.replying",
+          "group": "navigation@7"
         },
         {
           "command": "qq.mentionMember",
@@ -332,6 +334,11 @@
           "command": "qq.mentionSender",
           "when": "resourceScheme == qqchat && resourcePath =~ /^\\/group\\//",
           "group": "qq@2"
+        },
+        {
+          "command": "qq.cancelReply",
+          "when": "resourceScheme == qqchat && qq.replying",
+          "group": "qq@1"
         }
       ],
       "commandPalette": [
@@ -385,6 +392,11 @@
         "key": "ctrl+enter",
         "mac": "cmd+enter",
         "when": "editorTextFocus && resourceScheme == qqchat && qq.inDraft && !isComposing"
+      },
+      {
+        "command": "qq.cancelReply",
+        "key": "escape",
+        "when": "editorTextFocus && resourceScheme == qqchat && qq.replying && !isComposing && !suggestWidgetVisible && !findWidgetVisible && !renameInputVisible && !editorHasMultipleSelections && !inlineSuggestionVisible"
       }
     ],
     "languages": [

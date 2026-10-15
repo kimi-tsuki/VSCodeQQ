@@ -116,7 +116,9 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
   }
   updateContext(): void {
     const editor = vscode.window.activeTextEditor;
+    const key = editor && this.host.transcript?.key(editor.document.uri);
     void vscode.commands.executeCommand('setContext', 'qq.inDraft', !!editor && this.inDraft(editor));
+    void vscode.commands.executeCommand('setContext', 'qq.replying', !!key && !!this.host.store?.draft(key).replyId);
   }
   schedule(key: string, history = false): void {
     this.pending.set(key, history || !!this.pending.get(key));

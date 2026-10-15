@@ -264,6 +264,31 @@ export async function run(): Promise<void> {
     assert.equal(app.store!.draft('group:20001').replyId, '1000');
     assert.ok(doc.getText().includes('正在回复 群名片：第一条历史记录'));
     await vscode.commands.executeCommand('qq.cancelReply');
+    assert.equal(app.store!.draft('group:20001').replyId, undefined);
+    assert.ok(!doc.getText().includes('正在回复'));
+    {
+      ui ??= await TestUI.connect();
+      const mention = app.store!.reserveMention('group:20001', '789', '取消回复测试');
+      const attachment = { id: 'cancel-reply-image', kind: 'image' as const, label: '图片', placeholder: '[图片:取消回复测试]', path: 'unused.png' };
+      const draftText = `保留草稿 ${mention} ${attachment.placeholder}`;
+      app.store!.setDraft('group:20001', draftText, '1000', [attachment]);
+      await app.native.sync(vscode.window.activeTextEditor!);
+      await app.focusInput();
+      const beforeCancel = structuredClone(app.store!.draft('group:20001'));
+      const sentBeforeCancel = backend.sent.length;
+      await ui.waitFor(`!!document.querySelector('.editor-actions [aria-label*="取消回复"]')`);
+      await ui.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await ui.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await until(() => !app!.store!.draft('group:20001').replyId && !doc.getText().includes('正在回复'));
+      assert.equal(app.native.draft(doc), draftText);
+      assert.deepEqual(app.store!.draft('group:20001').attachments, beforeCancel.attachments);
+      assert.deepEqual(app.store!.draft('group:20001').mentions, beforeCancel.mentions);
+      assert.equal(backend.sent.length, sentBeforeCancel, '取消回复不能发送消息');
+      await ui.waitFor(`!document.querySelector('.editor-actions [aria-label*="取消回复"]')`);
+      app.store!.setDraft('group:20001', '', undefined, []);
+      await app.native.sync(vscode.window.activeTextEditor!);
+    }
+    checks.push('Esc 取消回复、工具栏按回复状态显隐、保留草稿/附件/@绑定且不发送');
     checks.push('消息头回复链接、指定消息引用、草稿显示回复摘要与取消');
     await until(() => app!.native.historyMatches(doc));
     const hover = await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', doc.uri, links.find(l => l.target?.path === 'qq.openImage')!.range.start);
@@ -453,7 +478,7 @@ export async function run(): Promise<void> {
     console.log('key trace', await ui.evaluate('window.__qqKeys'), app.native.inDraft(editor), JSON.stringify(app.native.draft(editor.document)));
     await until(() => app!.native.draft(editor.document).endsWith('\n'));
     assert.equal(backend.sent.length, sentCount);
-    await ui.enter(2); // Ctrl+Enter.
+    await ui.enter(process.platform === 'darwin' ? 4 : 2); // Cmd+Enter on macOS, Ctrl+Enter elsewhere.
     await until(() => app!.native.draft(editor.document).endsWith('\n\n'));
     assert.equal(backend.sent.length, sentCount);
     await ui.enter();

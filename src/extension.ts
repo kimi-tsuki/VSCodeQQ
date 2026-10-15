@@ -314,7 +314,7 @@ export class QQApp implements vscode.Disposable {
           this.tabs.refresh();
         }
       });
-      store.on('draft', (key, replyChanged) => { this.native.schedule(key, !!replyChanged); this.emojis.update(); });
+      store.on('draft', (key, replyChanged) => { this.native.schedule(key, !!replyChanged); this.native.updateContext(); this.emojis.update(); });
       await this.context.globalState.update('lastAccount', selfId);
       this.trees.forEach(tree => tree.refresh()); this.emojis.update(); this.tabs.refresh();
       for (const key of this.openChatKeys()) void this.ensureChatLoaded(key, 1);
