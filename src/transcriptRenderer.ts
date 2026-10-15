@@ -97,8 +97,7 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
     const cancellable = m.sendState === 'queued' || (m.sendState === 'sending' && m.sendProgress?.stage === 'upload');
     const footer = ending + (cancellable ? ' · [取消]' : '');
     if (cancellable) rendered.actions.push({ line: lines.length, start: footer.indexOf('[取消]'), end: footer.indexOf('[取消]') + 4, messageId: m.id, kind: 'cancel' });
-    lines.push(footer);
-    if (m.recalled) lines.push(`${style.comment} 已撤回`);
+    lines.push(footer + (m.recalled ? `  ${style.comment} 已撤回` : ''));
     for (let line = start; line < lines.length; line++) { rendered.messages.set(line, m.id); if (m.recalled) rendered.recalledLines.push(line); else if (self) rendered.ownLines.push(line); else if (m.mentioned || m.replyToSelf || target?.senderId === selfId) { rendered.attentionLines.push(line); (m.mentioned ? rendered.mentionLines : rendered.replyLines).push(line); } }
     lines.push('');
   }

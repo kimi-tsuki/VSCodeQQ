@@ -57,8 +57,9 @@ test('撤回块涵盖 DATE 到结尾注释，覆盖自己/提及/回复高亮且
     for (const message of [base, reply]) {
       const block = rendered.recalledLines.filter(line => rendered.messages.get(line) === message.id);
       assert.equal(block[0], rendered.starts.get(message.id));
-      assert.equal(lines[block.at(-1)!], codeStyle(language).comment + ' 已撤回');
-      assert.equal(lines[block.at(-2)!], codeStyle(language).ending);
+      const ending = codeStyle(language).ending + '  ' + codeStyle(language).comment + ' 已撤回';
+      assert.equal(lines[block.at(-1)!], ending);
+      assert.ok(!lines.includes(codeStyle(language).comment + ' 已撤回'), '撤回注释不能独占一行');
       assert.ok(block.every((line, index) => line === block[0] + index));
       assert.ok(!rendered.actions.some(a => a.messageId === message.id));
     }
@@ -68,6 +69,6 @@ test('撤回块涵盖 DATE 到结尾注释，覆盖自己/提及/回复高亮且
     assert.ok(rendered.text.includes('第一行') && rendered.text.includes('第二行'));
     const image = rendered.images.find(s => s.messageId === reply.id)!;
     assert.equal(lines[image.line].slice(image.start, image.end), '[图片]');
-    assert.equal(lines.filter(line => line === codeStyle(language).comment + ' 已撤回').length, 2);
+    assert.equal(lines.filter(line => line === codeStyle(language).ending + '  ' + codeStyle(language).comment + ' 已撤回').length, 2);
   }
 });

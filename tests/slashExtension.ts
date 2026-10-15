@@ -63,7 +63,7 @@ export async function testSlashCommands(app: QQApp, backend: MockNapCat, ui: Tes
   assert.ok(rendered.text.includes('click-body-probe'));
   const start = rendered.starts.get('77990')!;
   const end = rendered.recalledLines.filter(line => rendered.messages.get(line) === '77990').at(-1)!;
-  assert.equal(editor.document.lineAt(end).text, '// 已撤回');
+  assert.equal(editor.document.lineAt(end).text, '}  // 已撤回');
   assert.ok(!rendered.actions.some(a => a.messageId === '77990' && a.kind === 'reply'));
   assert.ok(!rendered.replyLines.some(line => rendered.messages.get(line) === '77702'));
   await vscode.commands.executeCommand('workbench.action.closeSidebar');
@@ -85,7 +85,7 @@ export async function testSlashCommands(app: QQApp, backend: MockNapCat, ui: Tes
     })()`));
     throw error;
   }
-  checks.push('撤回成功及远端群撤回保留原文，块后注释已撤回；真实编辑器正文和注释均标红且覆盖回复提醒高亮');
+  checks.push('撤回成功及远端群撤回保留原文，右花括号后同行注释已撤回；真实编辑器正文和注释均标红且覆盖回复提醒高亮');
   await app.openChat('private:10001');
   backend.emit({ ...backend.message(77991), message_type: 'private', user_id: 10001, sender: { user_id: 10001, nickname: '好友' }, message: [{ type: 'text', data: { text: '私聊撤回原文' } }] });
   await until(() => app.store!.messages.get('private:10001')!.some(m => m.id === '77991'));

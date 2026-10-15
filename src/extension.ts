@@ -239,7 +239,6 @@ export class QQApp implements vscode.Disposable {
     if (epoch !== this.epoch || this.stopped) return;
     const syncSince = new Map([...this.store!.chats.values()].map(c => [c.key, c.lastTime]));
     this.ready = true;
-    void this.emojis.inlineEntries().catch(error => this.log(error));
     const queued = this.queued; this.queued = [];
     for (const event of queued) this.onEvent(event);
     // Restored conversations already have an identity; do not make their
@@ -607,7 +606,7 @@ export class QQApp implements vscode.Disposable {
     };
     const currentKey = (item?: (Chat & { account?: string }) | string): string | undefined => typeof item === 'string' ? item : item?.account && item.account !== this.store?.selfId ? undefined : item?.key ?? this.target;
     register('qq.slash', (name?: string, invocation?: SlashInvocation) => this.slash.run(name, invocation));
-    register('qq.insertInlineEmoji', (id: string, invocation: SlashInvocation) => this.emojiCompletion.insert(id, invocation));
+    register('qq.openEmojiPicker', (invocation: SlashInvocation) => this.emojiCompletion.open(invocation));
     register('qq.connect', () => this.connect());
     register('qq.disconnect', () => this.client.disconnect());
     register('qq.configure', () => this.settings.open());
