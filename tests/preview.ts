@@ -14,7 +14,8 @@ export async function run(): Promise<void> {
   await backend.start();
   let app: QQApp | undefined, ui: TestUI | undefined;
   try {
-    const extension = vscode.extensions.getExtension<{ app: QQApp }>('rynxis.vscode-qq')!;
+    const identityManifest = JSON.parse(await fs.readFile(path.join(__dirname, '..', '..', 'package.json'), 'utf8'));
+    const extension = vscode.extensions.getExtension<{ app: QQApp }>(`${identityManifest.publisher}.${identityManifest.name}`)!;
     app = (await extension.activate()).app;
     await vscode.workspace.getConfiguration('editor').update('editContext', false, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration('qq').update('notifications', 'off', vscode.ConfigurationTarget.Global);
@@ -22,6 +23,17 @@ export async function run(): Promise<void> {
     await app.connect();
     await until(() => app!.ready && backend.listResponses >= 2);
     ui = await TestUI.connect();
+    const logo = await fs.readFile(path.join(extension.extensionPath, 'media', 'icon.svg'));
+    const icon = await ui.evaluate(`(async () => {
+      const image = new Image(); image.src = 'data:image/svg+xml;base64,${logo.toString('base64')}';
+      await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 256;
+      canvas.getContext('2d').drawImage(image, 0, 0, 256, 256);
+      return canvas.toDataURL('image/png').split(',')[1];
+    })()`);
+    const iconBytes = Buffer.from(icon, 'base64');
+    assert.equal(iconBytes.readUInt32BE(16), 256); assert.equal(iconBytes.readUInt32BE(20), 256);
+    await fs.writeFile(path.join(extension.extensionPath, 'media', 'icon.png'), iconBytes);
     await ui.call('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
     await vscode.commands.executeCommand('workbench.action.joinAllGroups');

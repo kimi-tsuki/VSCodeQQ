@@ -12,14 +12,14 @@ const cli = path.join(installation, match[1]);
 const executable = path.join(installation, 'Code.exe');
 const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
 delete env.VSCODE_DEV;
-const { version } = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-const identity = `rynxis.vscode-qq@${version}`;
-const artifact = path.join(root, 'artifacts', `vscode-qq-${version}.vsix`);
+const { publisher, name, version } = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const identity = `${publisher}.${name}@${version}`.toLowerCase();
+const artifact = path.join(root, 'artifacts', `${name}-${version}.vsix`);
 if (!fs.existsSync(artifact)) throw new Error('请先打包 VSIX');
 let result = spawnSync(executable, [cli, '--install-extension', artifact, '--force'], { env, stdio: 'inherit', timeout: 120000 });
 if (result.status !== 0) process.exit(result.status ?? 1);
 result = spawnSync(executable, [cli, '--list-extensions', '--show-versions'], { env, encoding: 'utf8', timeout: 30000 });
-if (result.status !== 0 || !result.stdout.split(/\r?\n/).includes(identity)) {
+if (result.status !== 0 || !result.stdout.toLowerCase().split(/\r?\n/).includes(identity)) {
   console.error('安装后的扩展列表验证失败'); process.exit(1);
 }
 console.log(`Verified installed: ${identity}`);

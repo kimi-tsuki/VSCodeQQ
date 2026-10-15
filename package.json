@@ -1,9 +1,17 @@
 {
-  "name": "vscode-qq",
-  "displayName": "QQ · Native Chat",
+  "name": "limelisest-napcat-qq",
+  "displayName": "NapCat QQ · Native Chat",
   "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
   "version": "0.2.8",
-  "publisher": "rynxis",
+  "publisher": "LimeLisest",
+  "author": "LimeLisest",
+  "icon": "media/icon.png",
+  "keywords": ["qq", "napcat", "onebot", "chat", "聊天"],
+  "pricing": "Free",
+  "galleryBanner": {
+    "color": "#111827",
+    "theme": "dark"
+  },
   "license": "MIT",
   "engines": {
     "vscode": "^1.95.0"
@@ -541,5 +549,8 @@
     "type": "git",
     "url": "https://github.com/limelisest/VSCodeQQ.git"
   },
-  "homepage": "https://github.com/limelisest/VSCodeQQ#readme"
+  "homepage": "https://github.com/limelisest/VSCodeQQ#readme",
+  "bugs": {
+    "url": "https://github.com/limelisest/VSCodeQQ/issues"
+  }
 }
