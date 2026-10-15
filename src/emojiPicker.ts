@@ -9,6 +9,10 @@ import { OneBotClient } from './onebot';
 import { Transcript } from './transcript';
 import { imageExtension } from './media';
 import { RecentEmoji, rememberEmoji } from './recentEmojis';
+import { imagePreviewMarkup } from './imageHover';
+
+export interface InlineEmoji { id: string; label: string; category: string; icon?: string; }
+interface InlineEmojiSource { account: string; label: string; file?: string; url?: string; faceId?: string; }
 
 export interface EmojiPickerHost {
   store?: ChatStore; target?: string; ready: boolean;
@@ -25,7 +29,84 @@ export class EmojiPicker implements vscode.WebviewViewProvider {
   focused = false;
   private wantEmojis = false;
   private webviewReady = false;
+  private inlineSources = new Map<string, InlineEmojiSource>();
+  private inlineAccount = '';
+  private inlineFavorites?: { account: string; time: number; urls: string[] };
+  private inlineLoading?: { account: string; task: Promise<void> };
+  private inlineImports = new Set<string>();
   constructor(private context: vscode.ExtensionContext, private host: EmojiPickerHost) {}
+  isImporting(key: string): boolean { return this.inlineImports.has(key); }
+  async inlineEntries(): Promise<InlineEmoji[]> {
+    const store = this.host.store; if (!store) return [];
+    const account = store.selfId;
+    if (account !== this.inlineAccount) { this.inlineSources.clear(); this.inlineAccount = account; }
+    if (this.host.ready && (this.inlineFavorites?.account !== account || Date.now() - this.inlineFavorites.time > 120000)) {
+      let pending = this.inlineLoading;
+      if (pending?.account !== account) {
+        const task = this.host.client.call('fetch_custom_face', { count: 500 }, 5000).then(data => {
+          if (store === this.host.store) this.inlineFavorites = { account, time: Date.now(), urls: [...new Set<string>((Array.isArray(data) ? data : []).filter((url: unknown): url is string => typeof url === 'string' && /^https?:\/\//i.test(url)))].slice(0, 500) };
+        }).catch(() => { /* Cached recent and QQ faces remain available offline. */ });
+        pending = this.inlineLoading = { account, task };
+      }
+      await pending.task;
+      if (this.inlineLoading === pending) this.inlineLoading = undefined;
+    }
+    if (store !== this.host.store) return [];
+    const entries: InlineEmoji[] = [];
+    const add = (source: Omit<InlineEmojiSource, 'account'>, category: string, icon?: string) => {
+      const id = createHash('sha256').update(`${account}:${source.faceId ?? source.file ?? source.url}`).digest('hex');
+      this.inlineSources.set(id, { ...source, account }); entries.push({ id, label: source.label, category, icon });
+    };
+    for (const [index, item] of this.recent(account).entries()) {
+      if (item.kind === 'face') { const face = basicFaces.find(f => f.id === item.faceId); if (face) add({ label: face.name, faceId: face.id }, `最近使用 ${index + 1}`, face.icon); }
+      else if (item.file && path.basename(item.file) === item.file) add({ label: item.label + ` ${index + 1}`, file: path.join(this.recentFolder(account), item.file) }, `最近使用 ${index + 1}`);
+    }
+    if (this.inlineFavorites?.account === account) this.inlineFavorites.urls.forEach((url, index) => add({ label: `收藏表情 ${index + 1}`, url }, '收藏表情'));
+    for (const face of basicFaces) add({ label: face.name, faceId: face.id }, 'QQ 表情', face.icon);
+    return entries;
+  }
+  async inlinePreview(id: string, doc: vscode.TextDocument): Promise<vscode.MarkdownString | undefined> {
+    const source = this.inlineSources.get(id), store = this.host.store;
+    if (!source || source.account !== store?.selfId) return;
+    const markdown = new vscode.MarkdownString(); markdown.supportHtml = true;
+    if (source.faceId) { markdown.appendText(source.label + '\n\nEnter 插入，Esc 关闭；不会自动发送。'); return markdown; }
+    try {
+      const file = source.file ?? await this.host.transcript!.media.get({ file: '', url: source.url });
+      const bytes = await fs.readFile(file); if (store !== this.host.store) return;
+      markdown.appendMarkdown(imagePreviewMarkup(file, bytes, doc));
+      markdown.appendText('\n\n' + source.label + ' · Enter 插入，不发送');
+    } catch { markdown.appendText('预览暂不可用，可重新选择或用 /emoji 刷新收藏表情。'); }
+    return markdown;
+  }
+  async insertInline(id: string, key: string, check: () => void): Promise<void> {
+    check(); const source = this.inlineSources.get(id), store = this.host.store, files = this.host.attachments;
+    if (!source || source.account !== store?.selfId || !files) throw new Error('表情列表已变化，请重新输入 ! 选择');
+    if (this.choosing) return;
+    this.choosing = true; this.inlineImports.add(key);
+    let attachment: Attachment | undefined;
+    try {
+      if (source.faceId) attachment = { id: randomUUID(), kind: 'face', label: source.label, faceId: source.faceId };
+      else {
+        const file = source.file ?? await this.host.transcript!.media.get({ file: '', url: source.url });
+        check(); const bytes = await fs.readFile(file); check();
+        attachment = await files.stage(bytes, source.label, true); check();
+      }
+      await this.host.attachToDraft(key, [attachment]);
+      check();
+      if (source.faceId) await this.remember(store.selfId, { id: `face:${source.faceId}`, kind: 'face', label: source.label, faceId: source.faceId });
+      else await this.rememberImage(store.selfId, await files.read(attachment), '收藏表情');
+    } finally {
+      if (attachment && !store.draft(key).attachments.some(a => a.id === attachment!.id)) await files.discard([attachment]);
+      this.inlineImports.delete(key); this.choosing = false;
+    }
+  }
+  private async rememberImage(account: string, bytes: Buffer, label: string): Promise<void> {
+    const ext = imageExtension(bytes); if (!ext) return;
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    const folder = this.recentFolder(account); await fs.mkdir(folder, { recursive: true });
+    await fs.writeFile(path.join(folder, hash + ext), bytes);
+    await this.remember(account, { id: hash, kind: 'image', label, file: hash + ext });
+  }
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     this.webviewReady = false;
@@ -85,11 +166,7 @@ export class EmojiPicker implements vscode.WebviewViewProvider {
         const attachment = await files.stage(await fs.readFile(file), '收藏表情', true);
         if (store !== this.host.store) return;
         await this.host.attachToDraft(key, [attachment]);
-        const bytes = await fs.readFile(file), ext = imageExtension(bytes)!;
-        const hash = createHash('sha256').update(bytes).digest('hex');
-        const folder = this.recentFolder(store.selfId); await fs.mkdir(folder, { recursive: true });
-        await fs.writeFile(path.join(folder, hash + ext), bytes);
-        await this.remember(store.selfId, { id: hash, kind: 'image', label: '收藏表情', file: hash + ext });
+        await this.rememberImage(store.selfId, await fs.readFile(file), '收藏表情');
         await this.close();
       }
       } catch (error: any) {

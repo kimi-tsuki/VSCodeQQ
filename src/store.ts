@@ -1,3 +1,4 @@
+import { restoreReply } from './replies';
 import { mentionText, restoredMentions } from './mentions';
 import { DraftService } from './draftService';
 import { EventEmitter } from 'node:events';
@@ -38,7 +39,7 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
       for (const key of data.favorites ?? []) if (this.chats.has(key)) this.favorites.add(key);
       for (const [key, draft] of Object.entries(data.drafts ?? {})) {
         const d = draft as Draft;
-        if (this.chats.has(key) && typeof d.text === 'string') this.drafts.set(key, { text: d.text, replyId: d.replyId, version: Number(d.version) || 0, attachments: Array.isArray(d.attachments) ? d.attachments : [], mentions: restoredMentions(d.mentions) });
+        if (this.chats.has(key) && typeof d.text === 'string') this.drafts.set(key, restoreReply({ ...d, text: d.text, replyId: d.replyId, version: Number(d.version) || 0, attachments: Array.isArray(d.attachments) ? d.attachments : [], mentions: restoredMentions(d.mentions) }));
       }
     } catch (error: any) { if (error.code !== 'ENOENT') this.emit('storageError', new Error('本地会话缓存无法读取，已使用空缓存')); }
   }
@@ -145,7 +146,7 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
   enrichMessage(message: Message): void {
     const messages = this.messages.get(message.chatKey);
     const index = messages?.findIndex(m => m.id === message.id) ?? -1;
-    if (!messages || index < 0) return;
+    if (!messages || index < 0 || messages[index].recalled) return;
     messages[index] = { ...messages[index], ...message };
     this.trackOutbox(message.chatKey); this.dirty.add(message.chatKey); this.changed(message.chatKey);
   }
@@ -167,6 +168,13 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
     const chat = this.chats.get(key);
     if (chat) { chat.ignoreUnread = !chat.ignoreUnread; this.changed(key, 'notification'); }
   }
+  recall(key: string, messageId: string): void {
+    const message = this.messages.get(key)?.find(m => m.id === messageId);
+    if (!message || message.recalled) return;
+    const chat = this.chats.get(key);
+    if (chat && this.messages.get(key)?.at(-1)?.id === messageId) chat.preview = '[消息已撤回]';
+    this.enrichMessage({ ...message, recalled: true, outgoing: undefined, sendState: undefined, sendProgress: undefined, sendError: undefined });
+  }
   toggleCollapsed(key: string): void {
     if (this.chats.get(key)?.type !== 'group') return;
     if (this.collapsed.has(key)) this.collapsed.delete(key); else this.collapsed.add(key);
@@ -180,6 +188,9 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
   draft(key: string): Draft { return this.draftService.draft(key); }
   setDraft(key: string, text: string, replyId?: string, attachments?: Attachment[]): Draft { return this.draftService.setDraft(key, text, replyId, attachments); }
   reserveMention(key: string, qq: string, name: string): string { return this.draftService.reserveMention(key, qq, name); }
+  editDraft(key: string, text: string): Draft { return this.draftService.editDraft(key, text); }
+  setReply(key: string, replyId: string, name: string): Draft { return this.draftService.setReply(key, replyId, name); }
+  cancelReply(key: string): Draft { return this.draftService.cancelReply(key); }
   clearDraftIfVersion(key: string, version: number): boolean { return this.draftService.clearDraftIfVersion(key, version); }
   completeSend(key: string, captured: Draft): boolean { return this.draftService.completeSend(key, captured); }
   attach(key: string, attachments: Attachment[]): void { this.draftService.attach(key, attachments); }

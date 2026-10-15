@@ -1,5 +1,6 @@
 import { mentionText } from './mentions';
 import { Attachment, Draft, emptyDraft, attachmentPattern, inline } from './model';
+import { boundReplies, removeReplies, replyToken } from './replies';
 
 export class DraftService {
   readonly values = new Map<string, Draft>();
@@ -7,8 +8,38 @@ export class DraftService {
   constructor(private changed: (key: string, replyChanged: boolean) => void) {}
   draft(key: string): Draft { return this.values.get(key) ?? emptyDraft(); }
   setDraft(key: string, text: string, replyId?: string, attachments = this.draft(key).attachments): Draft {
-    const replyChanged = this.draft(key).replyId !== replyId;
-    const next = { ...this.draft(key), text, replyId, attachments, version: this.draft(key).version + 1 };
+    const previous = this.draft(key);
+    const bindings = { ...previous.replies };
+    let token: string | undefined;
+    if (replyId) {
+      token = boundReplies(text, bindings).find(item => item.id === replyId)?.token;
+      if (!token) {
+        text = removeReplies(text, bindings);
+        token = Object.keys(bindings).find(token => bindings[token] === replyId) ?? replyToken('消息 ' + replyId);
+        bindings[token] = replyId; text = token + text;
+      }
+    } else text = removeReplies(text, bindings);
+    return this.write(key, text, replyId, token, bindings, attachments);
+  }
+  // Editor edits infer reply state from the remaining bound tokens. Never recreate
+  // a token here: deleting it must cancel, and undo must restore its saved identity.
+  editDraft(key: string, text: string): Draft {
+    const previous = this.draft(key), active = boundReplies(text, previous.replies)[0];
+    return this.write(key, text, active?.id, active?.token, previous.replies, previous.attachments);
+  }
+  setReply(key: string, replyId: string, name: string): Draft {
+    if (!/^-?\d+$/.test(replyId) || Number(replyId) === 0) throw new Error('这条消息暂时无法引用');
+    const previous = this.draft(key), bindings = { ...previous.replies };
+    let token = replyToken(name);
+    if (bindings[token] && bindings[token] !== replyId) token = replyToken(`${name} (${replyId})`);
+    delete bindings[token]; bindings[token] = replyId;
+    const keep = Object.fromEntries(Object.entries(bindings).slice(-8));
+    return this.write(key, token + removeReplies(previous.text, bindings), replyId, token, keep, previous.attachments);
+  }
+  cancelReply(key: string): Draft { const current = this.draft(key); return this.setDraft(key, removeReplies(current.text, current.replies), undefined, current.attachments); }
+  private write(key: string, text: string, replyId: string | undefined, token: string | undefined, replies: Record<string, string> | undefined, attachments: Attachment[]): Draft {
+    const previous = this.draft(key), replyChanged = previous.replyId !== replyId || previous.replyPlaceholder !== token;
+    const next = { ...previous, text, replyId, replyPlaceholder: token, replies, attachments, version: previous.version + 1 };
     this.values.set(key, next); this.changed(key, replyChanged); return next;
   }
   reserveMention(key: string, qq: string, name: string): string {

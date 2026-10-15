@@ -23,6 +23,20 @@ async function main(): Promise<void> {
     const [friends, groups] = await Promise.all([client.call('get_friend_list'), client.call('get_group_list')]);
     report.friends = friends.length; report.groups = groups.length;
     console.log(`NapCat lists: ${friends.length} friends, ${groups.length} groups`);
+    const checks: { action: string; supported: boolean }[] = [];
+    const queries: [string, Record<string, unknown>][] = ['get_status', 'get_version_info', 'can_send_image', 'can_send_record'].map(action => [action, {}]);
+    if (groups[0]?.group_id) queries.push(
+      ['get_group_info', { group_id: String(groups[0].group_id) }],
+      ['get_group_member_info', { group_id: String(groups[0].group_id), user_id: String(login.user_id) }],
+      ['_get_group_notice', { group_id: String(groups[0].group_id) }],
+      ['get_group_file_system_info', { group_id: String(groups[0].group_id) }]
+    );
+    for (const [action, params] of queries) {
+      try { await client.call(action, params, 5000); checks.push({ action, supported: true }); }
+      catch { checks.push({ action, supported: false }); }
+    }
+    report.slashReadOnlyApis = checks;
+    console.log('Slash read-only APIs:', JSON.stringify(checks));
     let favoriteUrls: string[] = [];
     try {
       const faces = await client.call('fetch_custom_face', { count: 48 });

@@ -23,7 +23,8 @@ export class Configuration {
   async token(): Promise<string> { return await this.context.secrets.get('qq.wsToken') ?? ''; }
   async saveConnection(url: string, token: string | undefined, autoConnect: boolean): Promise<void> {
     const invalid = validateUrl(url); if (invalid) throw new Error(invalid);
-    if (token !== undefined) await this.context.secrets.store('qq.wsToken', token);
+    if (token === '') await this.context.secrets.delete('qq.wsToken');
+    else if (token !== undefined) await this.context.secrets.store('qq.wsToken', token);
     const settings = vscode.workspace.getConfiguration('qq');
     await settings.update('wsUrl', url, vscode.ConfigurationTarget.Global);
     await settings.update('autoConnect', autoConnect, vscode.ConfigurationTarget.Global);
@@ -49,7 +50,8 @@ export class Configuration {
     if (Number.isFinite(config.history_message_count)) await settings.update('historyCount', Math.max(10, Math.min(500, config.history_message_count)), vscode.ConfigurationTarget.Global);
   }
   private async save(url: string, token: string): Promise<void> {
-    await this.context.secrets.store('qq.wsToken', token);
+    if (token === '') await this.context.secrets.delete('qq.wsToken');
+    else await this.context.secrets.store('qq.wsToken', token);
     await vscode.workspace.getConfiguration('qq').update('wsUrl', url, vscode.ConfigurationTarget.Global);
   }
 }

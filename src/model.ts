@@ -1,3 +1,4 @@
+import { outgoingReply } from './replies';
 import { randomUUID } from 'node:crypto';
 
 export type ChatType = 'group' | 'private';
@@ -34,6 +35,7 @@ export function normalizeSegments(segments: unknown[]): Segment[] {
 export interface Message {
   id: string; chatKey: string; senderId: string; senderName: string;
   time: number; segments: Segment[]; replyId?: string; mentioned: boolean; replyToSelf?: boolean;
+  recalled?: boolean;
   senderTitle?: string; senderRole?: string;
   senderRemark?: string; senderNickname?: string;
   sendState?: 'queued' | 'sending' | 'sent' | 'failed' | 'uncertain' | 'cancelled';
@@ -45,7 +47,7 @@ export interface Message {
 }
 export interface Member { id: string; name: string; title: string; role: string; nickname?: string; }
 export interface Attachment { id: string; kind: 'image' | 'face' | 'file'; label: string; size?: number; file?: string; faceId?: string; sticker?: boolean; placeholder?: string; }
-export interface Draft { text: string; replyId?: string; version: number; attachments: Attachment[]; mentions?: Record<string, string>; }
+export interface Draft { text: string; replyId?: string; replyPlaceholder?: string; replies?: Record<string, string>; version: number; attachments: Attachment[]; mentions?: Record<string, string>; }
 export const emptyDraft = (): Draft => ({ text: '', version: 0, attachments: [] });
 export const attachmentPattern = /\[(?:(?:图片|表情):\d+|文件:[^\]\r\n]+)\]/g;
 export function draftParts(text: string, attachments: Attachment[]): (string | Attachment)[] {
@@ -64,6 +66,7 @@ export function draftParts(text: string, attachments: Attachment[]): (string | A
 }
 // File uploads are independent operations so retries never resend successful neighbours.
 export function outgoingDrafts(draft: Draft): Draft[] {
+  draft = outgoingReply(draft);
   const parts = draftParts(draft.text, draft.attachments);
   if (!parts.some(p => typeof p !== 'string' && p.kind === 'file')) return [draft];
   const result: Draft[] = []; let chunk: (string | Attachment)[] = [];
@@ -143,7 +146,11 @@ export const messageText = (message: Message): string => message.segments.map(s 
 export const isPending = (m: Message): boolean => !!m.outgoing && !['sent', 'cancelled'].includes(m.sendState ?? '');
 export function mergeMessages(history: Message[], live: Message[], limit: number): Message[] {
   const values = new Map<string, Message>();
-  for (const item of [...history, ...live]) values.set(item.id, item);
+  // A late history/detail response must not restore a recalled message.
+  for (const item of [...history, ...live]) {
+    const existing = values.get(item.id);
+    values.set(item.id, existing?.recalled ? existing : item);
+  }
   const sorted = [...values.values()].sort((a, b) => a.time - b.time);
   const retained = sorted.filter(m => !isPending(m)).slice(-limit);
   return [...retained, ...sorted.filter(isPending)].sort((a, b) => a.time - b.time);

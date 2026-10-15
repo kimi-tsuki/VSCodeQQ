@@ -23,8 +23,9 @@ export class OutboxService {
     const pendingKey = `${store.selfId}:${key}`;
     const draft = store.draft(key);
     const current = draft.text === text && draft.replyId === replyId ? draft : store.setDraft(key, text, replyId);
-    const captured = { ...current, mentions: current.mentions ? { ...current.mentions } : undefined };
+    const captured = { ...current, mentions: current.mentions ? { ...current.mentions } : undefined, replies: current.replies ? { ...current.replies } : undefined };
     const drafts = outgoingDrafts(captured);
+    if (!drafts.length || drafts.every(draft => !draft.text.trim() && !draftParts(draft.text, draft.attachments).some(part => typeof part !== 'string'))) throw new Error('请在回复占位符后输入消息或插入附件');
     // Validate before creating outgoing records or clearing the draft.
     if (key.startsWith('group:')) for (const outgoing of drafts) {
       for (const part of draftParts(outgoing.text, outgoing.attachments)) if (typeof part === 'string') draftMentions(part, outgoing.mentions);

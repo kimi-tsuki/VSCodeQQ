@@ -3,7 +3,7 @@ import { CodeLanguage, codeStyle } from './codeStyle';
 
 export interface Span { line: number; start: number; end: number; messageId: string; imageIndex: number; }
 export interface MentionSpan { line: number; start: number; end: number; qq: string; name: string; }
-export interface Rendered { text: string; images: Span[]; mentions: MentionSpan[]; files: { line: number; start: number; end: number; messageId: string; fileIndex: number }[]; actions: { line: number; start: number; end: number; messageId: string; kind: 'reply' | 'retry' | 'cancel' }[]; messages: Map<number, string>; starts: Map<string, number>; ownLines: number[]; attentionLines: number[]; mentionLines: number[]; replyLines: number[]; }
+export interface Rendered { text: string; images: Span[]; mentions: MentionSpan[]; files: { line: number; start: number; end: number; messageId: string; fileIndex: number }[]; actions: { line: number; start: number; end: number; messageId: string; kind: 'reply' | 'retry' | 'cancel' }[]; messages: Map<number, string>; starts: Map<string, number>; ownLines: number[]; recalledLines: number[]; attentionLines: number[]; mentionLines: number[]; replyLines: number[]; }
 // Escape only the display projection; copy/reply/send continue using the original message.
 export const codeString = (text: string): string => JSON.stringify(text).slice(1, -1)
   .replace(/[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
@@ -12,7 +12,7 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
   const escape = (text: string) => style.escape(codeString(text));
   const quote = (text: string) => `"${escape(text)}"`;
   const lines = [style.constant('CHAT_NAME', [quote(chat.name)]), style.constant(chat.type === 'group' ? 'GROUP_ID' : 'FRIEND_ID', [quote(chat.id)]), `${style.comment} 底部草稿 Enter 发送 · Shift/Ctrl+Enter 换行 · 右键回复 · 图片悬浮预览`, ''];
-  const rendered: Rendered = { text: '', images: [], mentions: [], files: [], actions: [], messages: new Map(), starts: new Map(), ownLines: [], attentionLines: [], mentionLines: [], replyLines: [] };
+  const rendered: Rendered = { text: '', images: [], mentions: [], files: [], actions: [], messages: new Map(), starts: new Map(), ownLines: [], recalledLines: [], attentionLines: [], mentionLines: [], replyLines: [] };
   const byId = new Map(messages.map(m => [m.id, m]));
   let lastDay = '';
   for (const m of messages) {
@@ -64,7 +64,7 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
       lines.push(replay + style.stringEnd);
     }
     let current = style.string('msg');
-    const canReply = /^-?\d+$/.test(m.id) && m.id !== '0';
+    const canReply = !m.recalled && /^-?\d+$/.test(m.id) && m.id !== '0';
     const replySpan = (start: number, end: number) => {
       if (canReply && end > start) rendered.actions.push({ line: lines.length, start, end, messageId: m.id, kind: 'reply' });
     };
@@ -98,7 +98,8 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
     const footer = ending + (cancellable ? ' · [取消]' : '');
     if (cancellable) rendered.actions.push({ line: lines.length, start: footer.indexOf('[取消]'), end: footer.indexOf('[取消]') + 4, messageId: m.id, kind: 'cancel' });
     lines.push(footer);
-    for (let line = start; line < lines.length; line++) { rendered.messages.set(line, m.id); if (self) rendered.ownLines.push(line); else if (m.mentioned || m.replyToSelf || target?.senderId === selfId) { rendered.attentionLines.push(line); (m.mentioned ? rendered.mentionLines : rendered.replyLines).push(line); } }
+    if (m.recalled) lines.push(`${style.comment} 已撤回`);
+    for (let line = start; line < lines.length; line++) { rendered.messages.set(line, m.id); if (m.recalled) rendered.recalledLines.push(line); else if (self) rendered.ownLines.push(line); else if (m.mentioned || m.replyToSelf || target?.senderId === selfId) { rendered.attentionLines.push(line); (m.mentioned ? rendered.mentionLines : rendered.replyLines).push(line); } }
     lines.push('');
   }
   if (!messages.length) lines.push(`${style.comment} 暂无消息。`);

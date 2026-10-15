@@ -1,0 +1,87 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { availableSlashCommands, exactSlashCommand, executeSlashApi, slashCommands, SlashIO, validateSlashField } from '../src/slashCatalog';
+import { RequestInbox } from '../src/requestInbox';
+import { AccountSession } from '../src/accountSession';
+import { OneBotClient } from '../src/onebot';
+import { MockNapCat } from './fixture';
+
+const context = { key: 'group:20001', type: 'group' as const, id: '20001', name: '测试群', selfId: '123456' };
+const command = (name: string) => slashCommands.find(c => c.name === name)!;
+const io = (overrides: Partial<SlashIO> = {}): SlashIO => ({ check: () => {}, ask: async () => undefined, confirm: async () => true, call: async () => null, result: async () => {}, ...overrides });
+
+test('指令名全部英文、说明中文，私聊不提供群管理，完整草稿才解释为指令', () => {
+  assert.equal(new Set(slashCommands.map(c => c.name)).size, slashCommands.length);
+  for (const c of slashCommands) { assert.match(c.name, /^[a-z][a-z0-9_]*$/); assert.match(c.description, /[\u4e00-\u9fff]/); }
+  for (const name of ['emoji', 'image', 'file', 'mention', 'recall', 'status', 'requests', 'group_files']) assert.ok(command(name));
+  assert.equal(availableSlashCommands('private').some(c => c.name === 'ban'), false);
+  assert.equal(availableSlashCommands('group').some(c => c.name === 'ban'), true);
+  assert.equal(exactSlashCommand(' /STATUS\n', 'group')?.name, 'status');
+  for (const text of ['/表情', '正文 /status', '/status 文字', '//status', '/unknown', '/status\n第二行']) assert.equal(exactSlashCommand(text, 'group'), undefined);
+  assert.equal(exactSlashCommand('/mention', 'private'), undefined);
+  assert.ok(validateSlashField({ key: 'n', label: '时长', kind: 'integer', min: 0, max: 2592000 }, '-1'));
+  assert.ok(validateSlashField({ key: 'n', label: '时长', kind: 'integer', min: 0, max: 2592000 }, '1.5'));
+  assert.equal(validateSlashField({ key: 'message_id', label: '消息', kind: 'message' }, '-123'), undefined);
+  assert.ok(validateSlashField({ key: 'message_id', label: '消息', kind: 'message' }, '0'));
+});
+
+test('Slash 请求通过 WebSocket 传递正确对象和参数，取消与拒绝不会产生成功结果', async () => {
+  const backend = new MockNapCat(); await backend.start(); const client = new OneBotClient();
+  try {
+    await client.connect(backend.url);
+    let presented = 0;
+    const operation = io({ ask: async field => ({ user_id: '10001', duration: '60', card: '', message_id: '-123', times: '3' } as Record<string, string>)[field.key], call: (action, params) => client.call(action, params), result: async () => { presented++; } });
+    await executeSlashApi(command('ban'), context, operation);
+    assert.deepEqual(backend.calls.at(-1).params, { group_id: '20001', user_id: '10001', duration: 60 });
+    await executeSlashApi(command('unban'), context, operation);
+    assert.deepEqual(backend.calls.at(-1).params, { group_id: '20001', user_id: '10001', duration: 0 });
+    await executeSlashApi(command('card'), context, operation);
+    assert.equal(backend.calls.at(-1).params.card, '', '留空删除名片和取消对话框不同');
+    await executeSlashApi(command('recall'), context, operation);
+    assert.equal(backend.calls.at(-1).action, 'delete_msg'); assert.equal(backend.calls.at(-1).params.message_id, '-123');
+    const before = backend.calls.length;
+    assert.equal(await executeSlashApi(command('kick'), context, io({ ask: async () => undefined, call: operation.call })), false);
+    assert.equal(await executeSlashApi(command('kick'), context, { ...operation, confirm: async () => false }), false);
+    await assert.rejects(executeSlashApi(command('ban'), context, { ...operation, ask: async field => field.key === 'duration' ? '9999999999' : '10001' }), /整数/);
+    assert.equal(backend.calls.length, before);
+    const successful = presented;
+    await assert.rejects(executeSlashApi(command('recall'), context, { ...operation, call: async () => { throw new Error('权限不足'); } }), /权限不足/);
+    assert.equal(presented, successful);
+    await assert.rejects(executeSlashApi(command('ban'), { ...context, type: 'private' }, operation), /当前会话/);
+    assert.equal(backend.sent.length, 0);
+  } finally { client.dispose(); await backend.close(); }
+});
+
+test('参数选择、确认和响应期间更换连接，旧操作不能请求或展示新账号结果', async () => {
+  for (const phase of ['ask', 'confirm', 'call'] as const) {
+    const session = new AccountSession(), captured = session.capture(); let calls = 0, results = 0;
+    const check = () => { if (!captured.current()) throw new Error('连接已变化'); };
+    await assert.rejects(executeSlashApi(command('recall'), context, io({
+      check,
+      ask: async () => { if (phase === 'ask') session.advance(); return '123'; },
+      confirm: async () => { if (phase === 'confirm') session.advance(); return true; },
+      call: async () => { calls++; if (phase === 'call') session.advance(); return {}; },
+      result: async () => { results++; }
+    })), /连接已变化/);
+    assert.equal(calls, phase === 'call' ? 1 : 0); assert.equal(results, 0);
+  }
+});
+
+test('申请按账号隔离和去重，验证群邀请类型，容量有界且只删除已处理申请', () => {
+  const inbox = new RequestInbox();
+  const friend = { post_type: 'request', request_type: 'friend', self_id: 123456, user_id: 10001, flag: 'friend-flag', comment: '你好' };
+  inbox.add(friend, '123456'); inbox.add(friend, '123456');
+  assert.equal(inbox.entries('123456').length, 1); assert.deepEqual(inbox.entries('other'), []);
+  inbox.add({ ...friend, self_id: 999 }, '123456');
+  inbox.add({ ...friend, request_type: 'group', group_id: 20001, sub_type: 'wrong' }, '123456');
+  assert.equal(inbox.entries('123456').length, 1);
+  inbox.add({ ...friend, request_type: 'group', group_id: 20001, sub_type: 'invite' }, '123456');
+  assert.equal(inbox.entries('123456')[1].subType, 'invite');
+  inbox.remove('other', inbox.entries('123456')[0].key); assert.equal(inbox.entries('123456').length, 2);
+  inbox.remove('123456', inbox.entries('123456')[0].key); assert.equal(inbox.entries('123456').length, 1);
+  for (let n = 0; n < 110; n++) inbox.add({ ...friend, flag: 'flag-' + n }, '123456');
+  assert.equal(inbox.entries('123456').length, 100);
+  inbox.add({ ...friend, self_id: 999999 }, '999999');
+  assert.equal(inbox.entries('123456').length, 0); assert.equal(inbox.entries('999999').length, 1);
+  inbox.clear(); assert.equal(inbox.entries('999999').length, 0);
+});

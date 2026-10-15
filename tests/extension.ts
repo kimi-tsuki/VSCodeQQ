@@ -6,8 +6,12 @@ import type { QQApp } from '../src/extension';
 import { MockNapCat, png, tallPng, widePng, until } from './fixture';
 import { DRAFT_DIVIDER } from '../src/nativeEditor';
 import { TestUI } from './ui';
+import { testSlashCommands } from './slashExtension';
+import { testEmojiShortcuts } from './emojiCompletionExtension';
+import { testReplyPlaceholder } from './replyExtension';
 import { newChat } from '../src/model';
 import { allowsUnread } from '../src/notifications';
+const completionLabel = (item: vscode.CompletionItem) => typeof item.label === 'string' ? item.label : item.label.label;
 
 export async function run(): Promise<void> {
   const backend = new MockNapCat(); await backend.start();
@@ -238,11 +242,11 @@ export async function run(): Promise<void> {
 
 
     app.store!.setDraft('group:20001', '切换风格时保留\n草稿 $value', '1000');
-    await until(() => app!.native.draft(doc) === '切换风格时保留\n草稿 $value');
+    await until(() => app!.native.draft(doc) === app!.store!.draft('group:20001').replyPlaceholder + '切换风格时保留\n草稿 $value');
     for (const [codeLanguage, marker] of [['python', 'def recv_'], ['javascript', 'function recv_'], ['typescript', ': void {'], ['dart', 'String msg ='], ['kotlin', 'fun recv_'], ['java', 'final String CHAT_NAME'], ['swift', 'func recv_'], ['c', 'void recv_']]) {
       await app.settings.handle({ action: 'save', ...form, token: '', codeLanguage });
       await until(() => doc.getText().includes(marker) && app!.native.historyMatches(doc));
-      assert.equal(app.native.draft(doc), '切换风格时保留\n草稿 $value');
+      assert.equal(app.native.draft(doc), app.store!.draft('group:20001').replyPlaceholder + '切换风格时保留\n草稿 $value');
       assert.equal(app.store!.draft('group:20001').replyId, '1000');
       assert.equal(doc.languageId, 'qq-chat');
       const styleLinks = await vscode.commands.executeCommand<vscode.DocumentLink[]>('vscode.executeLinkProvider', doc.uri);
@@ -262,7 +266,7 @@ export async function run(): Promise<void> {
     assert.ok(replyLink);
     await vscode.commands.executeCommand('qq.reply', ...JSON.parse(decodeURIComponent(replyLink.target!.query)));
     assert.equal(app.store!.draft('group:20001').replyId, '1000');
-    assert.ok(doc.getText().includes('正在回复 群名片：第一条历史记录'));
+    assert.ok(app.native.draft(doc).includes('[回复:群名片]'));
     await vscode.commands.executeCommand('qq.cancelReply');
     checks.push('消息头回复链接、指定消息引用、草稿显示回复摘要与取消');
     await until(() => app!.native.historyMatches(doc));
@@ -663,8 +667,8 @@ export async function run(): Promise<void> {
     await until(() => app!.transcript!.rendered.get('group:20002')?.images.filter(s => s.messageId === '77801').length === 2);
     await until(() => !app!.native.isUpdating(editor.document) && app!.native.historyMatches(editor.document));
     app.store!.setDraft('group:20002', '前后', '1000', []); await app.native.sync(editor, true);
-    await until(() => app!.native.draft(editor.document) === '前后' && !app!.native.isUpdating(editor.document));
-    const insertion = editor.document.positionAt(app.native.region(editor.document)!.start + 1);
+    await until(() => app!.native.draft(editor.document) === app!.store!.draft('group:20002').replyPlaceholder + '前后' && !app!.native.isUpdating(editor.document));
+    const insertion = editor.document.positionAt(app.native.region(editor.document)!.start + app.store!.draft('group:20002').replyPlaceholder!.length + 1);
     editor.selection = new vscode.Selection(insertion, insertion);
     const secondImage = app.transcript!.rendered.get('group:20002')!.images.find(s => s.messageId === '77801' && s.imageIndex === 1)!;
     const imageHover = await app.transcript!.provideHover(editor.document, new vscode.Position(secondImage.line, secondImage.start + 1), new vscode.CancellationTokenSource().token);
@@ -672,7 +676,7 @@ export async function run(): Promise<void> {
     assert.ok(actions.includes('引用到发送栏') && actions.includes('command:qq.insertMessageImage'));
     const beforeReuse = backend.sent.length;
     await vscode.commands.executeCommand('qq.insertMessageImage', editor.document.uri.toString(), '77801', 1);
-    assert.match(app.native.draft(editor.document), /^前\[图片:\d+\]后$/);
+    assert.match(app.native.draft(editor.document).replace(app.store!.draft('group:20002').replyPlaceholder!, ''), /^前\[图片:\d+\]后$/);
     assert.equal(app.store!.draft('group:20002').replyId, '1000');
     assert.deepEqual(await app.attachments!.read(app.store!.draft('group:20002').attachments.at(-1)!), widePng);
     backend.emit({ ...backend.message(77802), group_id: 20002, message: [
@@ -780,11 +784,20 @@ export async function run(): Promise<void> {
     const end = editor.document.positionAt(editor.document.getText().length);
     editor.selection = new vscode.Selection(end, end);
     const completions = await vscode.commands.executeCommand<vscode.CompletionList>('vscode.executeCompletionItemProvider', editor.document.uri, end, '/');
-    assert.ok(completions.items.some(item => item.label === '/表情'));
+    assert.ok(completions.items.some(item => completionLabel(item) === '/emoji'));
+    for (const item of completions.items.filter(item => completionLabel(item).startsWith('/'))) {
+      assert.match(completionLabel(item), /^\/[a-z][a-z0-9_]*$/);
+      assert.match(item.detail ?? '', /[\u4e00-\u9fff]/);
+      assert.equal(typeof item.label, 'object', '候选行应直接显示中文说明');
+    }
+    for (const name of ['recall', 'like', 'poke', 'ban', 'requests', 'group_files', 'notices', 'help']) assert.ok(completions.items.some(item => completionLabel(item) === '/' + name));
     const sendsBeforePicker = backend.sent.length;
     await vscode.commands.executeCommand('editor.action.triggerSuggest');
     await ui.waitFor(`!!document.querySelector('.suggest-widget.visible')`);
+    await ui.waitFor(`document.querySelector('.suggest-widget.visible')?.textContent.includes('表情')`);
     await new Promise(r => setTimeout(r, 200));
+    const slashShot = await ui.call('Page.captureScreenshot', { format: 'png' });
+    await fs.writeFile(path.join(output, 'slash-commands.png'), Buffer.from(slashShot.data, 'base64'));
     await ui.enter();
     await until(() => app!.native.draft(editor.document) === '');
     const emojiUI = await ui.webview();
@@ -818,8 +831,8 @@ export async function run(): Promise<void> {
     checks.push('原生 / 指令补全、Enter 仅打开选择器、收藏图真实解码、方向键选择、Enter 插入与 Esc 返回');
     // Additional reliability checks run in the isolated mock profile.
     app.store!.setDraft('group:20002', '', undefined, []); await app.native.sync(editor, true);
-    assert.ok(completions.items.some(item => item.label === '/文件'));
-    assert.ok(completions.items.some(item => item.label === '/图片'));
+    assert.ok(completions.items.some(item => completionLabel(item) === '/file'));
+    assert.ok(completions.items.some(item => completionLabel(item) === '/image'));
     app.filterList('list', '张三');
     assert.ok(app.trees.find(t => t.section === 'list')!.getChildren().some(c => c.key === 'private:10001'));
     app.filterList('list', '');
@@ -836,7 +849,7 @@ export async function run(): Promise<void> {
     assert.ok(members.items.some(item => item.insertText === '[@:群名片] '));
     await app.sendMessage('group:20002', '@[10001] 测试提及');
     assert.ok(backend.sent.at(-1).message.some((s: any) => s.type === 'at' && s.data.qq === '10001'));
-    checks.push('/图片、/文件、成员补全实际发送 at 段，备注昵称联合搜索');
+    checks.push('/image、/file、成员补全实际发送 at 段，备注昵称联合搜索');
     // Exercise the real editor suggestion acceptance, including a Chinese prefix.
     await until(() => !app!.native.isUpdating(editor.document));
     app.store!.setDraft('group:20002', '你好', '1000', []);
@@ -848,13 +861,13 @@ export async function run(): Promise<void> {
     await ui.waitFor(`!!document.querySelector('.suggest-widget.visible')`);
     await new Promise(r => setTimeout(r, 200));
     await ui.enter();
-    await until(() => app!.native.draft(editor.document) === '你好[@:群名片] ');
+    await until(() => app!.native.draft(editor.document) === app!.store!.draft('group:20002').replyPlaceholder + '你好[@:群名片] ');
     assert.equal(backend.sent.length, beforeAt, 'Enter 选择群成员不能发送消息');
     assert.equal(app.store!.draft('group:20002').replyId, '1000');
     const senderLine = app.transcript!.rendered.get('group:20002')!.starts.get('77802')!;
     editor.selection = new vscode.Selection(senderLine, 0, senderLine, 0);
     await vscode.commands.executeCommand('qq.mentionSender');
-    assert.equal(app.native.draft(editor.document), '你好[@:群名片] [@:群名片] ');
+    assert.equal(app.native.draft(editor.document), app.store!.draft('group:20002').replyPlaceholder + '你好[@:群名片] [@:群名片] ');
     assert.equal(app.store!.draft('group:20002').replyId, '1000');
     assert.equal(backend.sent.length, beforeAt);
     const picking = vscode.commands.executeCommand('qq.mentionMember');
@@ -865,7 +878,7 @@ export async function run(): Promise<void> {
     assert.equal(backend.sent.length, beforeAt);
     await app.sendMessage('group:20002', app.native.draft(editor.document));
     assert.equal(backend.sent.at(-1).message.filter((s: any) => s.type === 'at').length, 3);
-    assert.ok(completions.items.some(item => item.label === '/艾特'));
+    assert.ok(completions.items.some(item => completionLabel(item) === '/mention'));
     checks.push('@ 中文紧邻输入、昵称筛选、Enter 只确认、右键发送者、成员选择器、草稿回复保留与真实 at 消息段');
     app.store!.setDraft('group:20002', '点击操作保留草稿');
     backend.emit({ ...backend.message(77990), group_id: 20002, message: [{ type: 'text', data: { text: 'click-body-probe ' } }, { type: 'at', data: { qq: '10001' } }] });
@@ -877,15 +890,15 @@ export async function run(): Promise<void> {
     assert.ok(!editor.selection.isEmpty, '拖选正文应保留文本选区');
     assert.equal(app.store!.draft('group:20002').replyId, undefined, '拖选复制不触发回复');
     await ui.clickText('click-body-probe');
-    await until(() => app!.store!.draft('group:20002').replyId === '77990');
-    assert.equal(app.native.draft(editor.document), '点击操作保留草稿');
+    await until(() => app!.store!.draft('group:20002').replyId === '77990' && app!.native.draft(editor.document) === app!.store!.draft('group:20002').replyPlaceholder + '点击操作保留草稿' && !app!.native.isUpdating(editor.document));
+    assert.equal(app.native.draft(editor.document), app.store!.draft('group:20002').replyPlaceholder + '点击操作保留草稿');
     editor.revealRange(new vscode.Range(bodyLine, 0, bodyLine, 0), vscode.TextEditorRevealType.InCenter);
     await new Promise(r => setTimeout(r, 350)); await ui.clickText('[@:群名片]');
-    await until(() => app!.native.draft(editor.document) === '点击操作保留草稿[@:群名片] ');
+    await until(() => app!.native.draft(editor.document) === app!.store!.draft('group:20002').replyPlaceholder + '点击操作保留草稿[@:群名片] ');
     const nameSpan = app.transcript!.rendered.get('group:20002')!.mentions.find(m => m.qq === '10001' && editor.document.lineAt(m.line).text.includes('char name[]'))!;
     editor.revealRange(new vscode.Range(nameSpan.line, 0, nameSpan.line, 0), vscode.TextEditorRevealType.InCenter);
     await new Promise(r => setTimeout(r, 350)); await ui.clickText('群名片');
-    await until(() => app!.native.draft(editor.document) === '点击操作保留草稿[@:群名片] [@:群名片] ');
+    await until(() => app!.native.draft(editor.document) === app!.store!.draft('group:20002').replyPlaceholder + '点击操作保留草稿[@:群名片] [@:群名片] ');
     assert.equal(app.store!.draft('group:20002').replyId, '77990');
     assert.equal(backend.sent.length, beforeAt + 1, '鼠标点击只编辑草稿，不自动发送');
     app.store!.setDraft('group:20002', '', undefined, []); await app.native.sync(editor, true);
@@ -1014,6 +1027,9 @@ export async function run(): Promise<void> {
     assert.equal(app.store!.collapsed.has('group:20002'), true);
     app.store!.toggleCollapsed('group:20002');
     checks.push('搜索后 Enter 打开正确会话并清空搜索返回完整列表，方向键选择和收纳箱搜索同样生效');
+    await testReplyPlaceholder(app, backend, checks);
+    await testEmojiShortcuts(app, backend, ui, checks);
+    await testSlashCommands(app, backend, ui, checks);
     await app.store!.flush();
     await fs.writeFile(path.join(output, 'extension-result.json'), JSON.stringify({ passed: checks, simulatedSends: backend.sent.length, realSends: 0 }, null, 2));
     console.log(`QQ extension integration: ${checks.length} checks passed`);

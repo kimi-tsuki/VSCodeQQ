@@ -125,6 +125,7 @@ export class Transcript implements vscode.DocumentLinkProvider, vscode.HoverProv
         md.appendMarkdown(`\n\n[重试这条消息](${this.retryCommand(doc.uri, message.id).toString()})`);
         md.isTrusted = { enabledCommands: ['qq.retryMessage'] }; return new vscode.Hover(md);
       }
+      if (message?.recalled) return new vscode.Hover('这条消息已撤回，保留本地已接收的内容。');
       if (!message || !/^-?\d+$/.test(message.id) || message.id === '0') return;
       const md = new vscode.MarkdownString(`[↩ 回复这条消息](${this.replyCommand(doc.uri, message.id).toString()})`);
       md.isTrusted = { enabledCommands: ['qq.reply'] };

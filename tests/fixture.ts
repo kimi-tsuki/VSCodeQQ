@@ -35,6 +35,7 @@ export class MockNapCat {
   historyDelays = new Map<string, number>();
   historyFailures = new Set<string>();
   failSend = false;
+  rejectedActions = new Set<string>();
   fileUploads: any[] = [];
   fileDelay = 0;
   failFileName = '';
@@ -54,7 +55,15 @@ export class MockNapCat {
     this.server.on('connection', socket => socket.on('message', async bytes => {
       const req = JSON.parse(bytes.toString()); this.calls.push(req);
       const respond = (data: unknown, status = 'ok') => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ status, retcode: status === 'ok' ? 0 : 100, data, echo: req.echo })); };
+      if (this.rejectedActions.has(req.action)) { respond(null, 'failed'); return; }
       switch (req.action) {
+        case 'get_status': respond({ online: true, good: true }); break;
+        case 'get_version_info': respond({ app_name: 'MockNapCat', app_version: 'test', protocol_version: 'v11' }); break;
+        case 'can_send_image': case 'can_send_record': respond({ yes: true }); break;
+        case 'get_group_info': respond({ group_id: req.params.group_id, group_name: '原生界面验证群', member_count: 2 }); break;
+        case 'get_group_root_files': respond({ files: [], folders: [{ folder_id: 'mock-folder', folder_name: '测试文件夹' }] }); break;
+        case 'get_group_files_by_folder': respond({ files: [{ file_id: 'mock-file', file_name: '测试文件.txt', file_size: 100, busid: 102 }], folders: [] }); break;
+        case 'get_csrf_token': respond({ token: 'mock-sensitive-value' }); break;
         case 'get_login_info': if (this.loginFailures-- > 0) { respond(null, 'failed'); break; } respond({ user_id: 123456, nickname: '测试账号' }); break;
         case 'get_friend_list': if (this.listDelay) await new Promise(r => setTimeout(r, this.listDelay)); this.listResponses++; respond([{ user_id: 10001, nickname: '张三', remark: '测试好友' }]); break;
         case 'get_group_list': if (this.listDelay) await new Promise(r => setTimeout(r, this.listDelay)); this.listResponses++; respond([{ group_id: 20001, group_name: '原生界面验证群' }, { group_id: 20002, group_name: '另一个会话' }]); break;

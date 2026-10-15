@@ -12,6 +12,10 @@ import { ChatListView } from './chatListView';
 import { HistoryQueue } from './historyQueue';
 import { ChatTabs } from './chatTabs';
 import { EmojiPicker } from './emojiPicker';
+import { EmojiCompletion } from './emojiCompletion';
+import { SlashCommands, SlashInvocation } from './slashCommands';
+import { availableSlashCommands, exactSlashCommand } from './slashCatalog';
+import { boundReplies, outgoingReply } from './replies';
 import { Configuration } from './configuration';
 import { SettingsTree } from './settingsTree';
 import { codeLanguages } from './codeStyle';
@@ -29,6 +33,8 @@ export class QQApp implements vscode.Disposable {
   readonly config: Configuration;
   readonly settings: ConnectionSettings;
   readonly emojis: EmojiPicker;
+  readonly emojiCompletion: EmojiCompletion;
+  readonly slash: SlashCommands;
   readonly imports = new AttachmentImporter(this);
   readonly editor: ChatEditorController;
   get native() { return this.editor.native; }
@@ -75,7 +81,8 @@ export class QQApp implements vscode.Disposable {
       client: this.client, session: this.session, get ready() { return app.ready; }, log: error => this.log(error)
     });
     this.editor = new ChatEditorController(this);
-    this.disposables.push(this.editor);
+    this.slash = new SlashCommands(this);
+    this.disposables.push(this.editor, this.slash);
     this.disposables.push(vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('qq')) {
         this.settingsTree.refresh();
@@ -87,6 +94,7 @@ export class QQApp implements vscode.Disposable {
     this.settings = new ConnectionSettings(context, this.config, () => this.connect(), () => this.cacheInfo(), () => this.cleanCache(true));
     this.disposables.push(this.settings);
     this.emojis = new EmojiPicker(context, this);
+    this.emojiCompletion = new EmojiCompletion(this);
     this.status.command = 'qq.connect'; this.status.name = 'QQ 连接'; this.status.show();
     this.disposables.push(this.tabChanges, vscode.window.registerFileDecorationProvider({
       onDidChangeFileDecorations: this.tabChanges.event,
@@ -94,12 +102,13 @@ export class QQApp implements vscode.Disposable {
     }));
     this.disposables.push(this.output, this.status);
     const selector = { scheme: 'qqchat', language: 'qq-chat' };
+    this.disposables.push(vscode.languages.registerCompletionItemProvider(selector, this.emojiCompletion, '!', '！'));
     this.disposables.push(vscode.languages.registerCompletionItemProvider(selector, {
       provideCompletionItems: async (doc, position, token) => {
         const region = this.native.region(doc);
         if (!region || doc.offsetAt(position) < region.start) return [];
         const before = doc.lineAt(position.line).text.slice(0, position.character);
-        const match = /(?:^|\s)(\/[\w\u4e00-\u9fff]*)$/.exec(before);
+        const match = /(?:^|\s)(\/[a-z0-9_]*)$/i.exec(before);
         if (!match) {
           const at = /(?:^|[^A-Za-z0-9_])@([^\s@\[\]]*)$/.exec(before);
           const key = this.transcript?.key(doc.uri);
@@ -114,12 +123,16 @@ export class QQApp implements vscode.Disposable {
           });
         }
         const range = new vscode.Range(position.translate(0, -match[1].length), position);
-        return ['/表情', '/emoji', '/图片', '/文件', '/艾特'].map((label, i) => {
-          const item = new vscode.CompletionItem(label, vscode.CompletionItemKind.Function);
-          item.detail = '打开底部表情选择器 · 方向键选择 · Enter 插入 · Esc 返回';
-          item.range = range; item.insertText = ''; item.sortText = String(i);
-          item.command = { command: label === '/艾特' ? 'qq.mentionMember' : label === '/图片' ? 'qq.insertImage' : label === '/文件' ? 'qq.insertFile' : 'qq.emojis', title: label };
-          if (i > 1) item.detail = label === '/艾特' ? '选择群成员，在草稿中插入 @ 提及' : '选择附件，在草稿光标处插入占位符';
+        const key = this.transcript?.key(doc.uri), chat = key && this.store?.chats.get(key);
+        const invocation = this.slash.capture(doc.uri);
+        if (!chat || !invocation) return [];
+        return availableSlashCommands(chat.type).map((command, index) => {
+          const label = '/' + command.name;
+          const item = new vscode.CompletionItem({ label, description: command.description }, vscode.CompletionItemKind.Function);
+          item.detail = command.description;
+          item.documentation = new vscode.MarkdownString(`${command.category} · ${command.description}\n\n选择后打开操作或参数选择框，Esc 取消。`);
+          item.range = range; item.insertText = ''; item.filterText = label; item.sortText = String(index).padStart(3, '0');
+          item.command = { command: 'qq.slash', title: label, arguments: [command.name, invocation] };
           return item;
         });
       }
@@ -187,6 +200,7 @@ export class QQApp implements vscode.Disposable {
     this.client.on('disconnected', () => {
       clearTimeout(this.initializationRetry);
       this.session.advance(); this.historyQueue.clear(); this.historyLoaded.clear(); this.ready = false; this.queued = [];
+      this.slash.clearResults();
       this.notifications?.dispose(); clearInterval(this.notificationTimer); this.updateStatus('未连接');
     });
     this.client.on('event', event => {
@@ -225,6 +239,7 @@ export class QQApp implements vscode.Disposable {
     if (epoch !== this.epoch || this.stopped) return;
     const syncSince = new Map([...this.store!.chats.values()].map(c => [c.key, c.lastTime]));
     this.ready = true;
+    void this.emojis.inlineEntries().catch(error => this.log(error));
     const queued = this.queued; this.queued = [];
     for (const event of queued) this.onEvent(event);
     // Restored conversations already have an identity; do not make their
@@ -294,6 +309,7 @@ export class QQApp implements vscode.Disposable {
         await oldStore.dispose();
       }
       if (!token.current() || this.stopped) return;
+      this.slash.requests.clear(); this.slash.clearResults(true);
       this.session.clearAccount(); this.historyLoaded.clear(); this.historyQueue.clear();
       this.target = undefined; this.editor.reset();
       const folder = path.join(this.context.globalStorageUri.fsPath, 'accounts', selfId);
@@ -338,8 +354,15 @@ export class QQApp implements vscode.Disposable {
   }
   private onEvent(event: any): void {
     const store = this.store;
-    if (!store || !['message', 'message_sent'].includes(event.post_type)) return;
-    if (event.self_id && id(event.self_id) !== store.selfId) return;
+    if (!store || event.self_id && id(event.self_id) !== store.selfId) return;
+    if (event.post_type === 'request') { this.slash.requests.add(event, store.selfId); return; }
+    if (event.post_type === 'notice' && ['group_recall', 'friend_recall'].includes(event.notice_type)) {
+      const key = event.notice_type === 'group_recall' ? `group:${id(event.group_id)}` : `private:${id(event.user_id)}`;
+      if (store.chats.has(key)) store.recall(key, id(event.message_id));
+      else if (id(event.user_id) === store.selfId) for (const chat of store.chats.values()) if (chat.type === 'private') store.recall(chat.key, id(event.message_id));
+      return;
+    }
+    if (!['message', 'message_sent'].includes(event.post_type)) return;
     try {
       const message = parseMessage(event, undefined, store.selfId);
       if (!store.chats.has(message.chatKey)) {
@@ -544,6 +567,7 @@ export class QQApp implements vscode.Disposable {
     const store = this.store;
     if (!store || !store.chats.has(key)) throw new Error('发送对象无效');
     const openDoc = vscode.workspace.textDocuments.find(doc => !doc.isClosed && this.transcript?.key(doc.uri) === key);
+    if (this.emojis.isImporting(key)) throw new Error('表情仍在导入，请在占位符出现后发送');
     if (openDoc && this.native.isImporting(openDoc)) throw new Error('文件仍在导入，请在占位符出现后发送');
     if (openDoc && !this.native.region(openDoc)) throw new Error('草稿分隔线被修改，发送已暂停。请先重建聊天文档');
     if (!text.trim() && !store.draft(key).attachments.some(a => !a.placeholder)) return;
@@ -582,6 +606,8 @@ export class QQApp implements vscode.Disposable {
       }));
     };
     const currentKey = (item?: (Chat & { account?: string }) | string): string | undefined => typeof item === 'string' ? item : item?.account && item.account !== this.store?.selfId ? undefined : item?.key ?? this.target;
+    register('qq.slash', (name?: string, invocation?: SlashInvocation) => this.slash.run(name, invocation));
+    register('qq.insertInlineEmoji', (id: string, invocation: SlashInvocation) => this.emojiCompletion.insert(id, invocation));
     register('qq.connect', () => this.connect());
     register('qq.disconnect', () => this.client.disconnect());
     register('qq.configure', () => this.settings.open());
@@ -610,7 +636,16 @@ export class QQApp implements vscode.Disposable {
     register('qq.focusInput', () => this.focusInput());
     register('qq.send', async () => {
       const editor = vscode.window.activeTextEditor, key = editor && this.transcript?.key(editor.document.uri);
-      if (editor && key) await this.submitDraft(key, this.native.draft(editor.document), this.store?.draft(key).replyId);
+      if (!editor || !key) return;
+      const text = this.native.draft(editor.document), chat = this.store?.chats.get(key);
+      const command = chat && exactSlashCommand(outgoingReply({ ...this.store!.draft(key), text }).text, chat.type);
+      if (command) {
+        const invocation = this.slash.capture(editor.document.uri), region = this.native.region(editor.document);
+        const keep = boundReplies(text, this.store!.draft(key).replies).map(reply => reply.token).join('');
+        if (invocation && region && await editor.edit(edit => edit.replace(new vscode.Range(editor.document.positionAt(region.start), editor.document.positionAt(region.start + text.length)), keep))) await this.slash.run(command.name, invocation);
+        return;
+      }
+      await this.submitDraft(key, text, this.store?.draft(key).replyId);
     });
     register('qq.newline', async () => {
       const editor = vscode.window.activeTextEditor;
@@ -658,11 +693,11 @@ export class QQApp implements vscode.Disposable {
     register('qq.mentionSender', () => this.mentionMember(true));
     register('qq.insertMention', (uri: string, qq: string, name?: string) => this.insertMention(uri, qq, name, true));
     register('qq.emojis', () => this.emojis.showEmojis());
-    register('qq.cancelReply', async () => {
-      const editor = vscode.window.activeTextEditor;
-      const key = editor && this.transcript?.key(editor.document.uri) || this.target;
-      if (!key || !this.store) return;
-      this.store.setDraft(key, this.store.draft(key).text);
+    register('qq.cancelReply', async (uri?: string, expectedToken?: string) => {
+      const editor = typeof uri === 'string' ? vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === uri) : vscode.window.activeTextEditor;
+      const key = editor && this.transcript?.key(editor.document.uri) || (!uri ? this.target : undefined);
+      if (!key || !this.store || expectedToken && this.store.draft(key).replyPlaceholder !== expectedToken) return;
+      this.store.cancelReply(key);
       if (editor && this.transcript?.key(editor.document.uri) === key) await this.native.sync(editor);
     });
     register('qq.latest', () => this.editor.latest());
@@ -680,7 +715,7 @@ export class QQApp implements vscode.Disposable {
       const msg = key && typeof messageId === 'string' ? this.store.messages.get(key)?.find(m => m.id === messageId) : this.transcript.messageAt(editor.document.uri, editor.selection.active.line);
       if (!key || !msg) return;
       if (!/^-?\d+$/.test(msg.id)) throw new Error('这条消息暂时无法引用');
-      this.target = key; this.store.setDraft(key, this.store.draft(key).text, msg.id); await this.native.sync(editor); await this.focusInput();
+      this.target = key; this.store.setReply(key, msg.id, this.store.displayMessages(key).find(m => m.id === msg.id)?.senderName || msg.senderName); await this.native.sync(editor); await this.focusInput();
     });
     register('qq.copyMessage', async () => {
       const editor = vscode.window.activeTextEditor;

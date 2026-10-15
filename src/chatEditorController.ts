@@ -12,6 +12,13 @@ type ViewSnapshot = { editor: vscode.TextEditor; follow: boolean; top: Anchor; s
 export class ChatEditorController implements vscode.Disposable {
   private imageDecoration = vscode.window.createTextEditorDecorationType({ color: new vscode.ThemeColor('textLink.foreground'), textDecoration: 'underline' });
   private ownDecoration = vscode.window.createTextEditorDecorationType({ isWholeLine: true, backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'), borderWidth: '0 0 0 2px', borderStyle: 'solid', borderColor: new vscode.ThemeColor('editorGutter.addedBackground') });
+  private recalledDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true, color: '#F14C4C', backgroundColor: '#F14C4C18',
+    borderWidth: '0 0 0 2px', borderStyle: 'solid', borderColor: '#F14C4C',
+    overviewRulerColor: '#F14C4C', overviewRulerLane: vscode.OverviewRulerLane.Right,
+    light: { color: '#B42318', backgroundColor: '#B4231818', borderColor: '#B42318', overviewRulerColor: '#B42318' },
+    rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed
+  });
   private following = new Map<vscode.TextEditor, boolean>();
   private pendingMessages = new Map<string, number>();
   private newMessagesStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 9);
@@ -29,7 +36,7 @@ export class ChatEditorController implements vscode.Disposable {
     });
     this.refreshHighlights();
     this.newMessagesStatus.command = 'qq.latest'; this.newMessagesStatus.name = 'QQ 新消息';
-    this.disposables.push(this.native, this.imageDecoration, this.ownDecoration, this.newMessagesStatus,
+    this.disposables.push(this.native, this.imageDecoration, this.ownDecoration, this.recalledDecoration, this.newMessagesStatus,
       vscode.workspace.registerFileSystemProvider('qqchat', this.native, { isCaseSensitive: true }),
       vscode.workspace.onDidCloseTextDocument(doc => this.native.release(doc)),
       vscode.window.onDidChangeTextEditorVisibleRanges(({ textEditor: editor }) => {
@@ -111,10 +118,13 @@ export class ChatEditorController implements vscode.Disposable {
     editor.setDecorations(this.mentionDecoration, reliable ? (this.host.transcript.rendered.get(key)?.mentionLines ?? []).map(line => new vscode.Range(line, 0, line, 0)) : []);
     editor.setDecorations(this.replyDecoration, reliable ? (this.host.transcript.rendered.get(key)?.replyLines ?? []).map(line => new vscode.Range(line, 0, line, 0)) : []);
     editor.setDecorations(this.ownDecoration, reliable ? (this.host.transcript.rendered.get(key)?.ownLines ?? []).map(line => new vscode.Range(line, 0, line, 0)) : []);
+    const recalledLines = reliable ? this.host.transcript.rendered.get(key)?.recalledLines ?? [] : [];
+    editor.setDecorations(this.recalledDecoration, recalledLines.map(line => editor.document.lineAt(line).range));
+    const recalled = new Set(recalledLines);
     editor.setDecorations(this.imageDecoration, [
       ...(this.native.historyMatches(editor.document) ? this.host.transcript.imageRanges(editor.document.uri) : []),
       ...this.native.links(editor.document).map(link => link.range)
-    ]);
+    ].filter(range => !recalled.has(range.start.line)));
   }
   beforeHistoryChange(uri: vscode.Uri): void {
     const key = this.host.transcript?.key(uri); if (!key) return;

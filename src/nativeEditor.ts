@@ -1,4 +1,3 @@
-import { codeString } from './transcriptRenderer';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { attachmentPattern, Attachment, inline, messageText } from './model';
@@ -50,10 +49,7 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
   }
   private prefix(uri: vscode.Uri, key: string): string {
     const history = this.host.transcript!.provideTextDocumentContent(uri);
-    const reply = this.host.store!.draft(key).replyId;
-    const target = reply && this.host.store!.displayMessages(key).find(m => m.id === reply);
-    const preview = target ? `${inline(target.senderName)}：${inline(messageText(target)).slice(0, 100)}` : `消息 ${reply}`;
-    const prefix = `${history}\n${reply ? `// ↪ 正在回复 ${preview}\nreply_to("${codeString(reply)}");\n` : ''}\n${DRAFT_DIVIDER}\n`;
+    const prefix = `${history}\n\n${DRAFT_DIVIDER}\n`;
     this.prefixes.set(uri.toString(), prefix); return prefix;
   }
   region(doc: vscode.TextDocument): { boundary: number; start: number; text: string } | undefined {
@@ -95,7 +91,7 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
         const from = Math.max(0, change.rangeOffset - start), to = Math.max(0, end - start);
         draft = draft.slice(0, from) + change.text + draft.slice(to);
       }
-      if (draft !== store.draft(key).text) store.setDraft(key, draft, store.draft(key).replyId);
+      if (draft !== store.draft(key).text) store.editDraft(key, draft);
       this.repairs.add(uri);
       const editor = vscode.window.visibleTextEditors.find(e => e.document === doc);
       if (editor) void this.sync(editor, true, true).then(() => {
@@ -107,7 +103,7 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     const region = this.region(doc);
     // A programmatic render may finish after a newer draft was queued. Its
     // document event must not write that older snapshot back into the store.
-    if (!internal && region && region.text !== store.draft(key).text) store.setDraft(key, region.text, store.draft(key).replyId);
+    if (!internal && region && region.text !== store.draft(key).text) store.editDraft(key, region.text);
     clearTimeout(this.saveTimers.get(uri));
     this.saveTimers.set(uri, setTimeout(() => {
       this.saveTimers.delete(uri); if (!doc.isClosed && doc.isDirty) void doc.save();
@@ -225,6 +221,25 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     }
   }
   async hover(doc: vscode.TextDocument, pos: vscode.Position): Promise<vscode.Hover | undefined> {
+    const key = this.host.transcript?.key(doc.uri), region = this.region(doc), draft = key ? this.host.store?.draft(key) : undefined;
+    if (key && region && draft?.replyPlaceholder && draft.replyId) {
+      const index = region.text.indexOf(draft.replyPlaceholder);
+      const range = new vscode.Range(doc.positionAt(region.start + index), doc.positionAt(region.start + index + draft.replyPlaceholder.length));
+      if (index >= 0 && range.contains(pos)) {
+        const target = this.host.store!.displayMessages(key).find(m => m.id === draft.replyId);
+        const md = new vscode.MarkdownString(); md.supportHtml = true;
+        md.appendText(target ? `${inline(target.senderName)}：${messageText(target).slice(0, 500)}` : `回复消息 ${draft.replyId}`);
+        for (let index = 0; index < Math.min(2, target?.segments.filter(s => s.type === 'image').length ?? 0); index++) {
+          try {
+            const file = await this.host.transcript!.image(doc.uri, draft.replyId, index), bytes = Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(file)));
+            if (this.host.transcript?.key(doc.uri) !== key) return;
+            md.appendMarkdown('\n\n' + imagePreviewMarkup(file, bytes, doc));
+          } catch { md.appendText('\n[图片预览暂不可用]'); }
+        }
+        md.appendText('\n\n删除占位符即可取消回复。');
+        return new vscode.Hover(md, range);
+      }
+    }
     const item = this.attachmentAt(doc, pos); if (!item) return;
     const md = new vscode.MarkdownString(); md.appendText(item.attachment.label);
     if (item.attachment.kind === 'image' && this.host.attachments && item.attachment.file) {
@@ -238,6 +253,15 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
   links(doc: vscode.TextDocument): vscode.DocumentLink[] {
     const region = this.region(doc); if (!region) return [];
     const result: vscode.DocumentLink[] = [];
+    const key = this.host.transcript?.key(doc.uri), draft = key ? this.host.store?.draft(key) : undefined;
+    if (draft?.replyPlaceholder && draft.replyId) {
+      const index = region.text.indexOf(draft.replyPlaceholder);
+      if (index >= 0) {
+        const range = new vscode.Range(doc.positionAt(region.start + index), doc.positionAt(region.start + index + draft.replyPlaceholder.length));
+        const link = new vscode.DocumentLink(range, vscode.Uri.parse(`command:qq.cancelReply?${encodeURIComponent(JSON.stringify([doc.uri.toString(), draft.replyPlaceholder]))}`));
+        link.tooltip = '取消此回复，也可直接删除占位符'; result.push(link);
+      }
+    }
     for (const match of region.text.matchAll(/\[图片:\d+\]/g)) {
       const item = this.attachmentAt(doc, doc.positionAt(region.start + match.index!));
       if (item?.attachment.file) {

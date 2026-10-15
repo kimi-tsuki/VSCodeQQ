@@ -1,4 +1,7 @@
 import './architecture';
+import './slash';
+import './replies';
+import './recall';
 import { renderTranscript } from '../src/transcriptRenderer';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

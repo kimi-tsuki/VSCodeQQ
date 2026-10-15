@@ -2,7 +2,7 @@
   "name": "vscode-qq",
   "displayName": "QQ · Native Chat",
   "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "publisher": "rynxis",
   "license": "MIT",
   "engines": {
@@ -70,6 +70,10 @@
       }
     ],
     "commands": [
+      {
+        "command": "qq.slash",
+        "title": "QQ: Slash commands / 指令菜单"
+      },
       {
         "command": "qq.connect",
         "title": "QQ: 连接 / 重新连接 NapCat",
