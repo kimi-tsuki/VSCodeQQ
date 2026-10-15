@@ -3,6 +3,7 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
+const preview = process.argv.includes('--preview');
 const profile = path.join(root, '.test-profile');
 const extensions = path.join(root, '.test-extensions');
 fs.mkdirSync(path.join(profile, 'User'), { recursive: true });
@@ -11,7 +12,8 @@ fs.rmSync(path.join(profile, 'User', 'globalStorage', 'rynxis.vscode-qq'), { rec
 fs.writeFileSync(path.join(profile, 'User', 'settings.json'), JSON.stringify({
   'qq.autoConnect': false, 'workbench.startupEditor': 'none',
   'security.workspace.trust.enabled': false, 'telemetry.telemetryLevel': 'off',
-  'extensions.autoCheckUpdates': false, 'update.mode': 'none', 'window.restoreWindows': 'none'
+  'extensions.autoCheckUpdates': false, 'update.mode': 'none', 'window.restoreWindows': 'none',
+  ...(preview ? { 'workbench.secondarySideBar.defaultVisibility': 'hidden', 'workbench.colorTheme': 'Default Dark Modern', 'window.zoomLevel': 0, 'editor.fontSize': 16, 'editor.lineHeight': 22, 'editor.stickyScroll.enabled': false, 'editor.minimap.enabled': false } : {})
 }));
 const isolated = path.join(root, '.vscode-test', 'runtime', 'Code.exe');
 const executable = process.env.VSCODE_EXECUTABLE || (process.platform === 'win32'
@@ -22,7 +24,7 @@ const result = spawnSync(executable, [
   '--new-window', '--disable-updates', '--skip-welcome', '--skip-release-notes',
   '--remote-debugging-port=19222', '--remote-debugging-address=127.0.0.1',
   '--user-data-dir', profile, '--extensions-dir', extensions,
-  `--extensionDevelopmentPath=${root}`, `--extensionTestsPath=${path.join(root, 'dist', 'test', 'extension.cjs')}`
+  `--extensionDevelopmentPath=${root}`, `--extensionTestsPath=${path.join(root, 'dist', 'test', preview ? 'preview.cjs' : 'extension.cjs')}`
 ], { cwd: root, env, stdio: 'inherit', timeout: 180000 });
 if (result.error) console.error(result.error.message);
 process.exit(result.status ?? 1);

@@ -23,6 +23,7 @@
     "build": "node scripts/build.mjs",
     "test": "node --test dist/test/unit.cjs",
     "test:extension": "node scripts/run-extension-tests.cjs",
+    "screenshots": "node scripts/run-extension-tests.cjs --preview",
     "test:live": "node dist/test/live.cjs",
     "package": "node scripts/package.mjs"
   },
