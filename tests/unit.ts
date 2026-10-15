@@ -1,3 +1,4 @@
+import './forward';
 import './architecture';
 import './slash';
 import './replies';
