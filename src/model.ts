@@ -44,6 +44,7 @@ export interface Message {
   sendError?: string;
   sendProgress?: { stage: 'upload' | 'confirm'; sent: number; total: number; bytesPerSecond?: number };
   outgoing?: Draft;
+  forwardDelivery?: boolean;
   localImages?: Attachment[];
   fileIds?: string[];
 }
@@ -155,7 +156,7 @@ export function parseMessage(raw: any, key?: string, selfId = ''): Message {
   return result;
 }
 export const messageText = (message: Message): string => message.segments.map(s => s.type === 'image' ? '[图片]' : s.text).join('');
-export const isPending = (m: Message): boolean => !!m.outgoing && !['sent', 'cancelled'].includes(m.sendState ?? '');
+export const isPending = (m: Message): boolean => (!!m.outgoing || !!m.forwardDelivery) && !['sent', 'cancelled'].includes(m.sendState ?? '');
 export function mergeMessages(history: Message[], live: Message[], limit: number): Message[] {
   const values = new Map<string, Message>();
   // A late history/detail response must not restore a recalled message.

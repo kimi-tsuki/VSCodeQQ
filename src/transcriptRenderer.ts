@@ -29,6 +29,7 @@ export function renderTranscript(chat: Chat, messages: Message[], selfId: string
     const target = m.replyId ? byId.get(m.replyId) : undefined;
     const tags = [self ? '我' : '', m.senderRole === 'owner' ? '群主' : m.senderRole === 'admin' ? '管理员' : '', !self && m.mentioned ? '@我' : '', !self && (m.replyToSelf || target?.senderId === selfId) ? '回复我' : ''].filter(Boolean);
     let state = m.sendState ? ({ queued: '等待发送…', sending: '发送中…', sent: '', failed: '发送失败 · [重试]', uncertain: '结果未确认 · [重试]', cancelled: '' })[m.sendState] : '';
+    if (m.forwardDelivery) state = state.replace(' · [重试]', '');
     if (m.sendState === 'sending' && m.sendProgress) {
       const p = m.sendProgress, percent = p.total ? Math.min(100, Math.floor(p.sent / p.total * 100)) : 0;
       const filled = Math.floor(percent / 10);

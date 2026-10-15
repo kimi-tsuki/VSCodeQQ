@@ -64,3 +64,35 @@ test('NapCat 内嵌合并转发内容在解析和缓存往返后仍能读取嵌�
   if (nested.type !== 'forward') throw new Error('missing nested forward');
   assert.equal(messageText(parseForwardMessages({ messages: nested.content }, 'group:1')[0]), '嵌套正文');
 });
+
+test('查看页双向映射唯一回复，文字和图片引用保持节点链接', () => {
+  const parsed = parseForwardMessages({ messages: [
+    { message_id: 11, sender: { user_id: 2, nickname: '甲' }, message: [{ type: 'text', data: { text: '被引用原文' } }, { type: 'image', data: { file: 'image' } }, { type: 'forward', data: { id: 'nested' } }] },
+    { message_id: 12, message: [{ type: 'reply', data: { id: 11 } }, { type: 'text', data: { text: '回复' } }] }
+  ] }, 'group:1');
+  assert.equal(parsed[1].replyId, parsed[0].id);
+  const rendered = renderTranscript(newChat('group', '1', '群'), parsed, '');
+  assert.ok(rendered.text.includes('甲：被引用原文[图片]'));
+  assert.ok(!rendered.text.includes('未加载'));
+  assert.equal(rendered.images.length, 2);
+  assert.ok(rendered.images.every(s => s.messageId === parsed[0].id && s.imageIndex === 0));
+  assert.equal(rendered.forwards[0].messageId, parsed[0].id);
+});
+
+test('重复、缺失、显示 ID 碰撞及嵌套回复不误关联', () => {
+  const reply = (id: string) => [{ type: 'reply', data: { id } }];
+  const parsed = parseForwardMessages({ messages: [
+    { message_id: 11, message: '甲' }, { message_id: 11, message: '乙' },
+    { message: reply('11') }, { message: reply('missing') }, { message: reply('forward:0') }
+  ] }, 'group:1');
+  assert.equal(new Set(parsed.map(m => m.id)).size, 5);
+  assert.deepEqual(parsed.slice(2).map(m => m.replyId), ['11', 'missing', 'forward:0']);
+  const rendered = renderTranscript(newChat('group', '1', '群'), parsed, '');
+  assert.equal((rendered.text.match(/未加载/g) ?? []).length, 3);
+  const outer = parseForwardMessages({ messages: [{ message_id: 11, message: '外层' }, { message: [{ type: 'forward', data: { id: 'nested', content: [{ message_id: 12, message: reply('11') }] } }] }] }, 'group:1');
+  const nested = outer[1].segments[0]; assert.equal(nested.type, 'forward');
+  if (nested.type !== 'forward') throw new Error('missing nested');
+  const inner = parseForwardMessages({ messages: nested.content }, 'group:1');
+  assert.equal(inner[0].replyId, '11');
+  assert.ok(renderTranscript(newChat('group', '1', '群'), inner, '').text.includes('回复消息 11（未加载）'));
+});

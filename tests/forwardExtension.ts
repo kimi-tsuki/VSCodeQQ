@@ -82,6 +82,10 @@ export async function testForwardCommands(app: QQApp, backend: MockNapCat, ui: T
   await ui.call('Input.insertText', { text: '确认转发' });
   await ui.waitFor(`document.querySelector('.quick-input-list')?.textContent.includes('确认转发') && !document.querySelector('.quick-input-list')?.textContent.includes('取消')`); await vscode.commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem'); await single;
   assert.ok(backend.calls.some(c => c.action === 'forward_friend_single_msg' && c.params.user_id === '10001' && c.params.message_id === '99020'));
+  const singleTarget = app.store!.messages.get('private:10001')!.find(m => m.id === '99001');
+  assert.equal(singleTarget?.sendState, 'sent');
+  assert.ok(app.store!.chats.get('private:10001')!.preview.includes('forward-probe-99020'));
+  assert.ok(app.store!.chats.get('private:10001')!.lastTime > 0);
   assert.deepEqual(app.store!.draft(key), draft);
   const beforeCancel = backend.calls.filter(c => c.action.includes('forward')).length;
   const cancel = vscode.commands.executeCommand('qq.mergeForward');
@@ -102,6 +106,8 @@ export async function testForwardCommands(app: QQApp, backend: MockNapCat, ui: T
   await ui.call('Input.insertText', { text: '确认转发' });
   await ui.waitFor(`document.querySelector('.quick-input-list')?.textContent.includes('确认转发') && !document.querySelector('.quick-input-list')?.textContent.includes('取消')`); await vscode.commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem'); await merge;
   const request = [...backend.calls].reverse().find(c => c.action === 'send_group_forward_msg');
+  assert.equal(app.store!.messages.get('group:20001')!.find(m => m.id === '99001')?.sendState, 'sent');
+  assert.equal(app.store!.chats.get('group:20001')!.preview, '[合并转发]');
   assert.deepEqual(request?.params, { group_id: '20001', messages: [{ type: 'node', data: { id: '99020' } }, { type: 'node', data: { id: '99021' } }] });
   assert.deepEqual(app.store!.draft(key), draft);
   assert.equal(backend.sent.length, sentBefore, '转发不能另外提交原会话草稿');

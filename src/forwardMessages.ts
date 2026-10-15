@@ -6,15 +6,23 @@ export function parseForwardMessages(data: unknown, key: string): Message[] {
   const nodes = value?.messages ?? value?.message;
   if (!Array.isArray(nodes)) throw new Error('NapCat 未返回有效的合并转发内容');
   if (nodes.length > 500) throw new Error('合并转发超过 500 条，请在 QQ 中查看');
-  return nodes.map((value, index) => {
+  const parsed = nodes.map(value => {
     if (!value || typeof value !== 'object') throw new Error('合并转发包含无效消息');
     const raw = value as Record<string, any>;
     const node = raw.type === 'node' ? raw.data : raw;
     if (!node || typeof node !== 'object') throw new Error('合并转发包含无效节点');
     const message = parseMessage({ ...node, message: node.message ?? node.content,
       sender: node.sender ?? { user_id: node.user_id ?? node.uin, nickname: node.nickname ?? node.name } }, key);
-    return { ...message, id: `forward:${index}` };
+    return message;
   });
+  // Each page owns its mapping. Duplicate IDs are deliberately unresolved.
+  const counts = new Map<string, number>();
+  const originals = new Set(parsed.flatMap(m => [m.id, m.replyId ?? '']));
+  for (const m of parsed) if (!m.id.startsWith('local:')) counts.set(m.id, (counts.get(m.id) ?? 0) + 1);
+  let prefix = 'forward:';
+  while (parsed.some((_, i) => originals.has(`${prefix}${i}`))) prefix += 'node:';
+  const unique = new Map(parsed.flatMap((m, i) => counts.get(m.id) === 1 ? [[m.id, `${prefix}${i}`] as const] : []));
+  return parsed.map((m, i) => ({ ...m, id: `${prefix}${i}`, replyId: m.replyId ? unique.get(m.replyId) ?? m.replyId : undefined }));
 }
 export function forwardRequest(target: Chat, messages: Message[], merged: boolean): { action: string; params: Record<string, unknown> } {
   if (!messages.length || !merged && messages.length !== 1 || messages.length > 100 || messages.some(m => !/^-?\d+$/.test(m.id) || m.id === '0' || m.recalled || m.sendState && m.sendState !== 'sent')) throw new Error('请选择 1～100 条已发送且未撤回的消息');

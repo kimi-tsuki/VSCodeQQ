@@ -9,7 +9,8 @@ import { Message, inline, messageText, parseMessage } from './model';
 import { Rendered, renderTranscript } from './transcriptRenderer';
 import { configuredCodeLanguage } from './configuration';
 import { imagePreviewMarkup } from './imageHover';
-import { forwardRequest, parseForwardMessages } from './forwardMessages';
+import { deliverForward } from './forwardDelivery';
+import { parseForwardMessages } from './forwardMessages';
 interface Host { store?: ChatStore; transcript?: Transcript; target?: string; session: AccountSession; client: OneBotClient; ready: boolean; }
 interface Page { messages: Message[]; rendered: Rendered; key: string; account: string; }
 export class ForwardController implements vscode.Disposable {
@@ -80,7 +81,6 @@ export class ForwardController implements vscode.Disposable {
   async forward(merged = false): Promise<void> {
     if (this.forwarding) return;
     this.forwarding = true;
-    let requested = false;
     try {
       const { store, chat, check } = this.context();
       const editor = vscode.window.activeTextEditor;
@@ -101,12 +101,11 @@ export class ForwardController implements vscode.Disposable {
       check(); if (!confirmed?.value) return;
       const latest = messages.map(m => store.messages.get(chat.key)?.find(value => value.id === m.id));
       if (latest.some(m => !m)) throw new Error('所选消息已不在当前记录中，请重新选择');
-      const request = forwardRequest(target.value, latest as Message[], merged);
-      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在转发消息' }, () => { check(); requested = true; return this.host.client.call(request.action, request.params); });
+      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '正在转发消息' }, () => {
+        check();
+        return deliverForward(this.host, target.value, latest as Message[], merged, error => this.output.appendLine(String(error)));
+      });
       check(); void vscode.window.showInformationMessage(`已转发到 ${target.value.name}`);
-    } catch (error) {
-      if (requested && error instanceof OneBotRequestError && error.kind !== 'rejected') throw new Error('转发结果未确认，请先在目标会话检查，不要直接重复转发。');
-      throw error;
     } finally { this.forwarding = false; }
   }
   async view(): Promise<void> {
