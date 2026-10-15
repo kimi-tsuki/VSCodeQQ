@@ -1,14 +1,17 @@
+import { DraftService } from './draftService';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { attachmentPattern, Attachment, Chat, Draft, Member, Message, emptyDraft, id, inline, isPending, mergeMessages, messageText, splitKey } from './model';
+import { Attachment, Chat, Draft, Member, Message, id, inline, isPending, mergeMessages, normalizeSegments, messageText, splitKey } from './model';
 
-export class ChatStore extends EventEmitter {
+export type StoreChange = 'messages' | 'chat' | 'members' | 'unread' | 'favorites' | 'notification';
+export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreChange]; draft: [key: string, replyChanged: boolean]; storageError: [error: Error] }> {
   readonly chats = new Map<string, Chat>();
   readonly messages = new Map<string, Message[]>();
   readonly outbox = new Map<string, Message>();
   readonly favorites = new Set<string>();
-  readonly drafts = new Map<string, Draft>();
+  readonly draftService = new DraftService((key, replyChanged) => { this.schedule(); this.emit('draft', key, replyChanged); });
+  get drafts() { return this.draftService.values; }
   readonly members = new Map<string, Map<string, Member>>();
   private loaded = new Set<string>();
   private loading = new Map<string, Promise<void>>();
@@ -16,16 +19,16 @@ export class ChatStore extends EventEmitter {
   private stateDirty = false;
   private saveTimer?: NodeJS.Timeout;
   private saving: Promise<void> = Promise.resolve();
-  private attachmentSerial = 0;
   constructor(readonly folder: string, readonly selfId: string, public limit = 500) { super(); }
   async restore(): Promise<void> {
     try {
       const data = JSON.parse(await fs.readFile(path.join(this.folder, 'state.json'), 'utf8'));
-      this.attachmentSerial = Number(data.attachmentSerial) || 0;
+      this.draftService.attachmentSerial = Number(data.attachmentSerial) || 0;
       for (const chat of data.chats ?? []) { try { splitKey(chat.key); this.chats.set(chat.key, { ...chat, notification: 'unknown' }); } catch {} }
       for (const message of data.outbox ?? []) {
         if (!this.chats.has(message.chatKey) || !isPending(message)) continue;
         if (['sending', 'queued'].includes(message.sendState)) { message.sendState = 'uncertain'; message.sendError = '上次关闭时结果未确认，请检查聊天记录后重试'; }
+        message.segments = normalizeSegments(message.segments ?? []);
         this.outbox.set(message.id, message);
         this.messages.set(message.chatKey, [...this.messages.get(message.chatKey) ?? [], message]);
       }
@@ -44,6 +47,7 @@ export class ChatStore extends EventEmitter {
       try {
         const cached: Message[] = JSON.parse(await fs.readFile(this.file(key), 'utf8'));
         const valid = Array.isArray(cached) ? cached.filter(m => m.chatKey === key && typeof m.id === 'string' && Array.isArray(m.segments)) : [];
+        for (const m of valid) m.segments = normalizeSegments(m.segments);
         for (const m of valid) if (m.sendState === 'sending' || m.sendState === 'queued') {
           m.sendState = 'uncertain'; m.sendError = '插件上次关闭时尚未确认结果，请检查聊天记录后再重试';
         }
@@ -78,7 +82,7 @@ export class ChatStore extends EventEmitter {
   upsert(chat: Chat): void {
     const current = this.chats.get(chat.key);
     this.chats.set(chat.key, current ? { ...current, name: chat.name, remark: chat.remark ?? current.remark, nickname: chat.nickname ?? current.nickname } : chat);
-    this.changed(chat.key);
+    this.changed(chat.key, 'chat');
   }
   history(key: string, messages: Message[]): void {
     const combined = [...messages, ...this.messages.get(key) ?? []];
@@ -93,7 +97,7 @@ export class ChatStore extends EventEmitter {
       id: id(m.user_id), name: inline(m.card || m.nickname || m.user_id), title: inline(m.title), nickname: inline(m.nickname),
       role: ['owner', 'admin', 'member'].includes(m.role) ? m.role : 'member'
     });
-    this.members.set(key, members); this.emit('change', key);
+    this.members.set(key, members); this.emit('change', key, 'members');
   }
   displayMessages(key: string): Message[] {
     return (this.messages.get(key) ?? []).map(message => {
@@ -102,12 +106,12 @@ export class ChatStore extends EventEmitter {
       const friend = message.senderId !== this.selfId && this.chats.get(`private:${message.senderId}`);
       if (friend && key.startsWith('private:')) name = friend.name;
       const segments = message.segments.map(segment => {
-        if (segment.type !== 'text' || !segment.at) return segment;
-        const member = this.members.get(key)?.get(segment.at);
-        const friend = this.chats.get(`private:${segment.at}`);
-        const displayName = (member?.name !== segment.at ? member?.name : undefined)
-          || segment.atName || friend?.remark || friend?.nickname || friend?.name || segment.at;
-        return { ...segment, text: segment.at === 'all' ? '@全体成员' : `@${displayName}` };
+        if (segment.type !== 'mention') return segment;
+        const member = this.members.get(key)?.get(segment.qq);
+        const friend = this.chats.get(`private:${segment.qq}`);
+        const displayName = (member?.name !== segment.qq ? member?.name : undefined)
+          || segment.name || friend?.remark || friend?.nickname || friend?.name || segment.qq;
+        return { ...segment, text: segment.qq === 'all' ? '@全体成员' : `@${displayName}` };
       });
       return { ...message, segments, senderName: name, senderRemark: friend ? friend.remark : undefined, senderNickname: member?.nickname || message.senderNickname || (friend ? friend.nickname : undefined), senderTitle: member?.title || message.senderTitle, senderRole: member?.role || message.senderRole };
     });
@@ -129,11 +133,11 @@ export class ChatStore extends EventEmitter {
   }
   markRead(key: string): void {
     const chat = this.chats.get(key);
-    if (chat && (chat.unread || chat.mentioned || chat.replied)) { chat.unread = 0; chat.mentioned = false; chat.replied = false; this.changed(key); }
+    if (chat && (chat.unread || chat.mentioned || chat.replied)) { chat.unread = 0; chat.mentioned = false; chat.replied = false; this.changed(key, 'unread'); }
   }
   markReplyToSelf(key: string): void {
     const chat = this.chats.get(key);
-    if (chat?.unread && !chat.replied) { chat.replied = true; this.changed(key); }
+    if (chat?.unread && !chat.replied) { chat.replied = true; this.changed(key, 'unread'); }
   }
   enrichMessage(message: Message): void {
     const messages = this.messages.get(message.chatKey);
@@ -154,66 +158,25 @@ export class ChatStore extends EventEmitter {
   }
   setNotification(key: string, notification: Chat['notification']): void {
     const chat = this.chats.get(key);
-    if (chat && chat.notification !== notification) { chat.notification = notification; this.changed(key); }
+    if (chat && chat.notification !== notification) { chat.notification = notification; this.changed(key, 'notification'); }
   }
   toggleIgnoreUnread(key: string): void {
     const chat = this.chats.get(key);
-    if (chat) { chat.ignoreUnread = !chat.ignoreUnread; this.changed(key); }
+    if (chat) { chat.ignoreUnread = !chat.ignoreUnread; this.changed(key, 'notification'); }
   }
   toggleFavorite(key: string): void {
     if (!this.chats.has(key)) return;
     if (this.favorites.has(key)) this.favorites.delete(key); else this.favorites.add(key);
-    this.changed(key);
+    this.changed(key, 'favorites');
   }
-  draft(key: string): Draft { return this.drafts.get(key) ?? emptyDraft(); }
-  setDraft(key: string, text: string, replyId?: string, attachments = this.draft(key).attachments): Draft {
-    const replyChanged = this.draft(key).replyId !== replyId;
-    const next = { text, replyId, attachments, version: this.draft(key).version + 1 };
-    this.drafts.set(key, next); this.schedule(); this.emit('draft', key, replyChanged); return next;
-  }
-  clearDraftIfVersion(key: string, version: number): boolean {
-    if (this.draft(key).version !== version) return false;
-    this.setDraft(key, '', undefined, []); return true;
-  }
-  completeSend(key: string, captured: Draft): boolean {
-    if (this.clearDraftIfVersion(key, captured.version)) return true;
-    const sent = new Set(captured.attachments.map(a => a.id));
-    const current = this.draft(key);
-    const keep = (a: Attachment) => !sent.has(a.id) || !!(a.placeholder && current.text.includes(a.placeholder));
-    if (current.attachments.some(a => !keep(a))) this.setDraft(key, current.text, current.replyId, current.attachments.filter(keep));
-    return false;
-  }
-  attach(key: string, attachments: Attachment[]): void {
-    const prepared = this.prepareAttachments(key, attachments);
-    const draft = this.draft(key);
-    this.setDraft(key, draft.text + prepared.map(a => a.placeholder).join(''), draft.replyId);
-  }
-  prepareAttachments(key: string, attachments: Attachment[]): Attachment[] {
-    const draft = this.draft(key);
-    const used = draft.text.match(attachmentPattern)?.length ?? 0;
-    if (used + attachments.length > 8) throw new Error('每条消息最多附带 8 个附件');
-    const tokens = new Set(draft.attachments.map(a => a.placeholder));
-    const prepared = attachments.map(a => {
-      let placeholder: string;
-      if (a.kind === 'file') {
-        const name = inline(a.label).replace(/\[/g, '［').replace(/\]/g, '］');
-        placeholder = `[文件:${name}]`; let number = 2;
-        while (tokens.has(placeholder)) placeholder = `[文件:${name} (${number++})]`;
-      } else placeholder = `[${a.kind === 'image' ? '图片' : '表情'}:${++this.attachmentSerial}]`;
-      tokens.add(placeholder); return { ...a, placeholder };
-    });
-    // Retain a small number of removed tokens so undo/redo can restore their attachments.
-    const retained = draft.attachments.filter(a => !a.placeholder || draft.text.includes(a.placeholder));
-    const orphaned = draft.attachments.filter(a => a.placeholder && !draft.text.includes(a.placeholder)).slice(-48);
-    this.setDraft(key, draft.text, draft.replyId, [...retained, ...orphaned, ...prepared]);
-    return prepared;
-  }
-  removeAttachment(key: string, id: string): void {
-    const draft = this.draft(key), attachment = draft.attachments.find(a => a.id === id);
-    const text = attachment?.placeholder ? draft.text.split(attachment.placeholder).join('') : draft.text;
-    this.setDraft(key, text, draft.replyId, draft.attachments.filter(a => a.id !== id));
-  }
-  private changed(key: string): void { this.schedule(); this.emit('change', key); }
+  draft(key: string): Draft { return this.draftService.draft(key); }
+  setDraft(key: string, text: string, replyId?: string, attachments?: Attachment[]): Draft { return this.draftService.setDraft(key, text, replyId, attachments); }
+  clearDraftIfVersion(key: string, version: number): boolean { return this.draftService.clearDraftIfVersion(key, version); }
+  completeSend(key: string, captured: Draft): boolean { return this.draftService.completeSend(key, captured); }
+  attach(key: string, attachments: Attachment[]): void { this.draftService.attach(key, attachments); }
+  prepareAttachments(key: string, attachments: Attachment[]): Attachment[] { return this.draftService.prepareAttachments(key, attachments); }
+  removeAttachment(key: string, id: string): void { this.draftService.removeAttachment(key, id); }
+  private changed(key: string, kind: StoreChange = 'messages'): void { this.schedule(); this.emit('change', key, kind); }
   private schedule(): void {
     this.stateDirty = true;
     if (!this.saveTimer) this.saveTimer = setTimeout(() => { this.saveTimer = undefined; void this.flush(); }, 1200);
@@ -231,7 +194,7 @@ export class ChatStore extends EventEmitter {
           await this.atomic(this.file(key), this.messages.get(key) ?? []);
         }
         await this.atomic(path.join(this.folder, 'state.json'), {
-          version: 2, outbox: [...this.outbox.values()], attachmentSerial: this.attachmentSerial, chats: [...this.chats.values()], favorites: [...this.favorites],
+          version: 3, outbox: [...this.outbox.values()], attachmentSerial: this.draftService.attachmentSerial, chats: [...this.chats.values()], favorites: [...this.favorites],
           drafts: Object.fromEntries([...this.drafts].filter(([, d]) => d.text || d.replyId || d.attachments.length))
         });
       } catch {

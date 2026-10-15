@@ -32,7 +32,7 @@ export class TestUI {
     if (result.exceptionDetails) throw new Error('测试窗口 DOM 检查失败');
     return result.result.value;
   }
-  async webview(): Promise<{ evaluate: (expression: string) => Promise<any>; key: (key: string, code: number) => Promise<void> }> {
+  async webview(selector = '#favoriteFaces'): Promise<{ evaluate: (expression: string) => Promise<any>; key: (key: string, code: number) => Promise<void> }> {
     const sessions = new Map<string, string>();
     for (let attempt = 0; attempt < 40; attempt++) {
       const { targetInfos } = await this.call('Target.getTargets');
@@ -49,7 +49,7 @@ export class TestUI {
               if (result.exceptionDetails) throw new Error('表情 Webview DOM 检查失败');
               return result.result.value;
             };
-            if (await evaluate(`!!document.getElementById('favoriteFaces')`)) return { evaluate, key: async (key, code) => {
+            if (await evaluate(`!!document.querySelector(${JSON.stringify(selector)})`)) return { evaluate, key: async (key, code) => {
               await this.call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: code }, session);
               await this.call('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code }, session);
             } };

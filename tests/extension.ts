@@ -6,6 +6,7 @@ import type { QQApp } from '../src/extension';
 import { MockNapCat, png, tallPng, widePng, until } from './fixture';
 import { DRAFT_DIVIDER } from '../src/nativeEditor';
 import { TestUI } from './ui';
+import { newChat } from '../src/model';
 import { allowsUnread } from '../src/notifications';
 
 export async function run(): Promise<void> {
@@ -54,6 +55,24 @@ export async function run(): Promise<void> {
     ui = await TestUI.connect();
     await ui.waitFor(`document.body.innerText.includes('列表') && document.body.innerText.includes('收藏')`);
     assert.ok(extension.packageJSON.contributes.views.qq.every((v: any) => !v.when));
+    await vscode.commands.executeCommand('qq.search.list');
+    const listView = await ui.webview('body[data-section="list"] #search');
+    await listView.evaluate(`(() => {const input=document.getElementById('search');input.value='验证 20001';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await until(() => app!.trees.find(t => t.section === 'list')!.getChildren().length === 1);
+    assert.equal(await listView.evaluate(`document.querySelectorAll('.row').length`), 1);
+    assert.equal(await listView.evaluate(`document.querySelector('.name').textContent`), '原生界面验证群');
+    await listView.evaluate(`document.getElementById('clear').click()`);
+    await until(() => app!.trees.find(t => t.section === 'list')!.getChildren().length === 3);
+    await listView.evaluate(`(() => {const input=document.getElementById('search');input.value='不存在';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    assert.ok((await listView.evaluate(`document.getElementById('empty').textContent`)).includes('没有匹配'));
+    await vscode.commands.executeCommand('qq.clearSearch.list');
+    await until(() => app!.trees.find(t => t.section === 'list')!.getChildren().length === 3);
+    await listView.evaluate(`document.getElementById('search').focus()`);
+    await listView.key('ArrowDown', 40);
+    assert.equal(await listView.evaluate(`document.activeElement.getAttribute('role')`), 'option');
+    await listView.key('Escape', 27);
+    assert.equal(await listView.evaluate(`document.activeElement.id`), 'search');
+    checks.push('列表固定搜索框：多关键词即时筛选、空结果、清除、方向键与 Esc，保留上下两个分区');
     await new Promise(r => setTimeout(r, 700));
     await fs.mkdir(path.join(extension.extensionPath, '.test-output'), { recursive: true });
     const settingsScreenshot = await ui.call('Page.captureScreenshot', { format: 'png' });
@@ -79,6 +98,73 @@ export async function run(): Promise<void> {
     assert.ok(doc.getText().includes('void recv_')); assert.ok(doc.getText().includes(DRAFT_DIVIDER));
     await until(() => doc.getText().includes('#define INFO "调试员" "群名片"') && doc.getText().includes('// 管理员') && doc.getText().includes('备注：测试好友'));
     checks.push('原生虚拟文档、历史消息和 C 风格语言');
+    const cachedKey = 'private:10003';
+    app.store!.upsert(newChat('private', '10003', '缓存恢复验证'));
+    await fs.writeFile(path.join(app.store!.folder, 'private-10003.json'), JSON.stringify([{ ...app.store!.messages.get('group:20001')![0], id: 'cached-only', chatKey: cachedKey, segments: [{ type: 'text', text: '离线缓存无需发送即可显示' }] }]));
+    backend.historyDelays.set('10003', 1200);
+    const cachedUri = app.transcript!.uri(app.store!.chats.get(cachedKey)!);
+    await vscode.commands.executeCommand('vscode.open', cachedUri, { preview: false });
+    await until(() => vscode.window.activeTextEditor?.document.getText().includes('离线缓存无需发送即可显示') === true, 1000);
+    assert.ok(app.store!.messages.get(cachedKey)?.some(m => m.id === 'cached-only'));
+    await until(() => backend.calls.some(c => c.action === 'get_friend_msg_history' && c.params.user_id === '10003'));
+    await app.loadHistory(cachedKey);
+    assert.equal(backend.calls.filter(c => c.action === 'get_friend_msg_history' && c.params.user_id === '10003').length, 1, '激活和恢复标签复用同一个历史请求');
+    const failureKey = 'private:10004';
+    app.store!.upsert(newChat('private', '10004', '加载失败验证'));
+    backend.historyFailures.add('10004');
+    await app.openChat(failureKey);
+    const failureDoc = vscode.window.activeTextEditor!.document;
+    await until(() => failureDoc.getText().includes('历史加载失败'));
+    backend.historyFailures.delete('10004');
+    await app.loadHistory(failureKey);
+    await until(() => failureDoc.getText().includes('第一条历史记录') && !failureDoc.getText().includes('历史加载失败'));
+    const failureTab = vscode.window.tabGroups.all.flatMap(g => g.tabs).find(t => t.input instanceof vscode.TabInputText && t.input.uri.toString() === failureDoc.uri.toString());
+    if (failureTab) await vscode.window.tabGroups.close(failureTab);
+    app.store!.chats.delete(failureKey); app.store!.messages.delete(failureKey);
+    checks.push('空会话加载失败有提示，再次加载可恢复，无需发送消息');
+    const cachedTab = vscode.window.tabGroups.all.flatMap(g => g.tabs).find(t => t.input instanceof vscode.TabInputText && t.input.uri.toString() === cachedUri.toString());
+    if (cachedTab) await vscode.window.tabGroups.close(cachedTab);
+    app.store!.chats.delete(cachedKey); app.store!.messages.delete(cachedKey); backend.historyDelays.delete('10003');
+    await app.openChat('group:20001');
+    checks.push('直接恢复原生标签时立即载入磁盘缓存，不需发送消息；激活事件与手动加载合并请求');
+
+    await until(() => !app!.native.isUpdating(doc));
+    const renderBefore = app.transcript!.rendered.get('group:20001');
+    const originalMessages = app.store!.messages.get('group:20001')!;
+    app.store!.messages.set('group:20001', [...originalMessages, { ...originalMessages[0], id: 'transaction-test', time: Date.now() / 1000, segments: [{ type: 'text', text: '模拟文档写入失败' }] }]);
+    const failingEditor = { document: doc, edit: async () => { throw new Error('simulated editor failure'); } } as unknown as vscode.TextEditor;
+    try {
+      await assert.rejects(app.native.sync(failingEditor), /simulated editor failure/);
+      assert.equal(app.transcript!.rendered.get('group:20001'), renderBefore);
+      assert.ok(app.native.historyMatches(doc));
+    } finally { app.store!.messages.set('group:20001', originalMessages); }
+    const documentVersion = doc.version;
+    let renderCalls = 0;
+    const render = app.transcript!.provideTextDocumentContent.bind(app.transcript);
+    app.transcript!.provideTextDocumentContent = uri => { renderCalls++; return render(uri); };
+    try {
+      app.store!.toggleFavorite('group:20001'); app.store!.toggleFavorite('group:20001'); app.store!.markRead('group:20001');
+      await new Promise(r => setTimeout(r, 200));
+      assert.equal(renderCalls, 0); assert.equal(doc.version, documentVersion);
+    } finally { app.transcript!.provideTextDocumentContent = render; }
+    checks.push('编辑失败回滚渲染位置，收藏/已读变化不重渲染正文');
+    const draftEditor = vscode.window.activeTextEditor!;
+    app.store!.setDraft('group:20001', '较早的草稿');
+    let releaseDraft!: () => void, renderStarted = false;
+    const delayedEditor = { document: draftEditor.document, edit: async (callback: any, options: any) => {
+      renderStarted = true; await new Promise<void>(r => releaseDraft = r); return draftEditor.edit(callback, options);
+    } } as unknown as vscode.TextEditor;
+    const oldRender = app.native.sync(delayedEditor, false);
+    await until(() => renderStarted);
+    app.store!.setDraft('group:20001', '渲染期间更新的新草稿');
+    releaseDraft(); await oldRender;
+    await until(() => app!.native.draft(doc) === '渲染期间更新的新草稿' && !app!.native.isUpdating(doc));
+    assert.equal(app.store!.draft('group:20001').text, '渲染期间更新的新草稿');
+    app.store!.setDraft('group:20001', '');
+    await until(() => app!.native.draft(doc) === '');
+    checks.push('较早的程序渲染完成后不会覆盖更新的草稿');
+
+
     app.store!.setDraft('group:20001', '切换风格时保留\n草稿 $value', '1000');
     await until(() => app!.native.draft(doc) === '切换风格时保留\n草稿 $value');
     for (const [codeLanguage, marker] of [['python', 'def recv_'], ['javascript', 'function recv_'], ['typescript', ': void {'], ['dart', 'String msg ='], ['kotlin', 'fun recv_'], ['java', 'final String CHAT_NAME'], ['swift', 'func recv_'], ['c', 'void recv_']]) {
@@ -165,8 +251,8 @@ export async function run(): Promise<void> {
     checks.push('历史加载与实时消息合并');
     backend.failSend = false; backend.sendDelay = 0;
     app.store!.setDraft('group:20002', '', undefined, []);
-    await app.composer.handleMessage({ type: 'pasteImage', account: '123456', key: 'group:20002', base64: png.toString('base64') });
-    await app.composer.handleMessage({ type: 'basicFace', account: '123456', key: 'group:20002', id: '14' });
+    await app.imports.pasteImage('group:20002', png.toString('base64'));
+    await app.emojis.handleMessage({ type: 'basicFace', account: '123456', key: 'group:20002', id: '14' });
     assert.equal(app.store!.draft('group:20002').attachments.length, 2);
     await app.sendMessage('group:20002', app.store!.draft('group:20002').text);
     const imageSend = backend.sent.at(-1).message;
@@ -175,7 +261,7 @@ export async function run(): Promise<void> {
     assert.equal(app.store!.draft('group:20002').attachments.length, 0);
     assert.ok(!JSON.stringify(app.store!.messages.get('group:20002')).includes('base64://'));
     checks.push('图片粘贴、纯附件发送、QQ 表情和上传内容不落入聊天缓存');
-    await app.composer.handleMessage({ type: 'pasteImage', account: '123456', key: 'group:20002', base64: png.toString('base64') });
+    await app.imports.pasteImage('group:20002', png.toString('base64'));
     backend.sendDelay = 350; backend.detailDelay = 1600; backend.emitSent = false;
     const imageDraft = app.store!.draft('group:20002').text, beforeImageSend = backend.sent.length;
     const pendingImage = app.sendMessage('group:20002', imageDraft);
@@ -196,7 +282,10 @@ export async function run(): Promise<void> {
     backend.sendDelay = 0; backend.detailDelay = 0; backend.emitSent = true;
     checks.push('图片立即进入记录、原位发送状态、输入立即清空、本地预览、回执去重');
     backend.sendDelay = 600;
-    const firstQueued = app.sendMessage('group:20002', '队列第一条');
+    const submitted = await app.submitDraft('group:20002', '队列第一条');
+    assert.ok(submitted);
+    assert.ok(app.outbox.isBusy('123456', 'group:20002'), '提交返回时网络发送应仍在后台');
+    const firstQueued = submitted.completion;
     await until(() => !(app as any).submitting.has('123456:group:20002'));
     const secondQueued = app.sendMessage('group:20002', '队列第二条');
     assert.equal(app.store!.draft('group:20002').text, '');
@@ -207,7 +296,7 @@ export async function run(): Promise<void> {
     assert.deepEqual(backend.sent.slice(-2).map(s => s.message[0].data.text), ['队列第一条', '队列第二条']);
     backend.sendDelay = 0; app.store!.setDraft('group:20002', '', undefined, []);
     checks.push('上一条发送期间继续提交下一条、按顺序发送、完成时保留正在输入的草稿');
-    await app.composer.handleMessage({ type: 'faces', account: '123456', key: 'group:20002', count: 48 });
+    await app.emojis.handleMessage({ type: 'faces', account: '123456', key: 'group:20002', count: 48 });
     assert.ok(backend.calls.some(c => c.action === 'fetch_custom_face'));
     const sticker = await app.attachments!.stage(png, '收藏表情', true);
     app.store!.attach('group:20002', [sticker]); await app.sendMessage('group:20002', app.store!.draft('group:20002').text);
@@ -233,15 +322,20 @@ export async function run(): Promise<void> {
     assert.equal(app.native.region(editor.document)!.text, before);
     assert.equal(app.native.inDraft(editor), true);
     await vscode.commands.executeCommand('qq.send');
+    await app.outbox.whenIdle('123456', 'group:20002');
     assert.deepEqual(backend.sent.at(-1).message.map((s: any) => s.type), ['text', 'image', 'text']);
     assert.equal(backend.sent.at(-1).message[0].data.text, '前');
     assert.equal(backend.sent.at(-1).message[2].data.text, '后');
     await until(() => app!.native.region(editor.document)!.text === '');
     checks.push('同一文档底部草稿、光标插图、原顺序发送、新消息不覆盖草稿');
     await app.attachToDraft('group:20002', [await app.attachments!.stage(png, '随后删除')]);
+    editor = vscode.window.activeTextEditor!;
+    await until(() => !app!.native.isUpdating(editor.document));
     const region = app.native.region(editor.document)!;
-    await editor.edit(edit => edit.replace(new vscode.Range(editor.document.positionAt(region.start), editor.document.positionAt(editor.document.getText().length)), '只发文字'));
+    assert.equal(await editor.edit(edit => edit.replace(new vscode.Range(editor.document.positionAt(region.start), editor.document.positionAt(editor.document.getText().length)), '只发文字')), true);
+    assert.equal(app.native.draft(editor.document), '只发文字');
     await vscode.commands.executeCommand('qq.send');
+    await app.outbox.whenIdle('123456', 'group:20002');
     assert.deepEqual(backend.sent.at(-1).message, [{ type: 'text', data: { text: '只发文字' } }]);
     checks.push('删除图片占位符后不发送该图片');
     await app.native.sync(editor);
@@ -292,10 +386,25 @@ export async function run(): Promise<void> {
     await until(() => backend.sent.length === sentCount + 1);
     assert.equal(backend.sent.at(-1).message[0].data.text, '保留草稿\n\n');
     checks.push('真实键盘事件：Enter 发送、Shift+Enter 和 Ctrl+Enter 换行');
+    await app.outbox.whenIdle(app.store!.selfId, 'group:20002');
+    app.store!.setDraft('group:20002', Array.from({length:25}, (_, i) => '换行验证 '+i).join('\n'));
+    await until(() => app!.native.draft(editor.document).endsWith('换行验证 24') && !app!.native.isUpdating(editor.document));
+    await app.native.focus(editor); app.editor.latest(editor);
+    for (let i = 0; i < 4; i++) {
+      await vscode.commands.executeCommand('qq.newline');
+      await until(() => editor.selection.active.line === editor.document.lineCount - 1);
+      await new Promise(r => setTimeout(r, 150));
+      const gap = await ui.evaluate(`(() => {const root=document.querySelector('.editor-group-container.active .monaco-editor');const cursor=root?.querySelector('.cursor');if(!cursor)return null;return root.getBoundingClientRect().bottom-cursor.getBoundingClientRect().bottom;})()`);
+      assert.ok(gap !== null && gap >= 18 && gap < 65, '换行后光标底下保留一行空白，实际 '+gap+'px');
+    }
+    app.store!.setDraft('group:20002', '');
+    await until(() => app!.native.draft(editor.document) === '');
+    checks.push('连续换行跟随到末尾，光标下方保留约一行空白');
+
     await until(() => editor.document.getText().includes('void send_123456(void)'));
     assert.ok(app.transcript!.rendered.get('group:20002')!.ownLines.length > 0);
     checks.push('群名片、好友备注、头衔/管理员标签，自己的 send 标记与主题底色');
-    await until(() => app!.native.draft(editor.document) === '' && !app!.native.isUpdating(editor.document) && !(app as any).sendQueues.has('123456:group:20002'));
+    await until(() => app!.native.draft(editor.document) === '' && !app!.native.isUpdating(editor.document) && !app!.outbox.isBusy('123456', 'group:20002'));
     await app.native.focus(editor);
     await editor.edit(edit => edit.insert(editor.document.positionAt(app!.native.region(editor.document)!.start), '自动置底时保留草稿'));
     await until(() => app!.native.draft(editor.document) === '自动置底时保留草稿');
@@ -317,15 +426,18 @@ export async function run(): Promise<void> {
     backend.emit({ ...backend.message(8750, '上翻时收到消息'), group_id: 20002 });
     await until(() => editor.document.getText().includes('上翻时收到消息'));
     await new Promise(r => setTimeout(r, 150));
-    assert.ok(Math.abs(editor.visibleRanges[0].start.line - top) <= 1, `上翻后应保持阅读位置：${top} -> ${editor.visibleRanges[0].start.line}; following=${(app as any).following.get(editor)}`);
+    assert.ok(Math.abs(editor.visibleRanges[0].start.line - top) <= 1, `上翻后应保持阅读位置：${top} -> ${editor.visibleRanges[0].start.line}; following=${app!.editor.isFollowing(editor)}`);
     await ui.waitFor("document.body.innerText.includes('新消息 · 1 条')");
     await vscode.commands.executeCommand('qq.latest');
     await until(() => editor.visibleRanges.some(r => r.end.line >= editor.document.lineCount - 3));
     checks.push('自动置底、保留草稿选区、上翻暂停、显示新消息计数、返回最新恢复跟随');
+    // Exercise an existing window/profile that still allows scrolling beyond EOF.
+    await vscode.workspace.getConfiguration('editor', editor.document).update('scrollBeyondLastLine', true, vscode.ConfigurationTarget.Global, true);
     const originalLimit = app.store!.limit;
     app.store!.limit = 50;
-    for (let i = 0; i < 5; i++) {
-      backend.emit({ ...backend.message(8751 + i, `历史达到上限后的消息 ${i}\n第二行`), group_id: 20002 });
+    let bottomGap: number | undefined;
+    for (let i = 0; i < 30; i++) {
+      backend.emit({ ...backend.message(18500 + i, `历史达到上限后的消息 ${i}\n第二行`), group_id: 20002 });
       await until(() => editor.document.getText().includes(`历史达到上限后的消息 ${i}`) && !app!.native.isUpdating(editor.document));
       await new Promise(r => setTimeout(r, 250));
       const gap = await ui.evaluate(`(() => {
@@ -333,12 +445,34 @@ export async function run(): Promise<void> {
         const row = [...root.querySelectorAll('.view-line')].find(e => e.textContent.includes('自动置底时保留草稿'));
         return row ? root.getBoundingClientRect().bottom - row.getBoundingClientRect().bottom : null;
       })()`);
-      assert.ok(gap !== null && gap >= -2 && gap < 50, `消息 ${i} 后草稿应保持贴底，实际底部空白 ${gap}px`);
+      assert.ok(gap !== null && gap >= -2 && gap < 120, `消息 ${i} 后草稿应保持贴底，实际底部空白 ${gap}px`);
+      // Native reveal keeps up to five surrounding/sticky lines; its gap must
+      // remain bounded and constant rather than growing towards mid-screen.
+      if (bottomGap !== undefined) assert.ok(Math.abs(gap - bottomGap) <= 2);
+      bottomGap = gap;
       assert.equal(editor.document.offsetAt(editor.selection.anchor) - app.native.region(editor.document)!.start, 2);
       assert.equal(editor.document.offsetAt(editor.selection.active) - app.native.region(editor.document)!.start, 4);
     }
+    await vscode.workspace.getConfiguration('editor', editor.document).update('scrollBeyondLastLine', undefined, vscode.ConfigurationTarget.Global, true);
+    app.store!.setDraft('group:20002', '');
+    await app.native.sync(editor);
+    const idlePanel = vscode.window.createOutputChannel('QQ idle scroll test');
+    for (let i = 0; i < 12; i++) {
+      if (i === 6) { idlePanel.appendLine('Receive while another panel has focus'); idlePanel.show(false); await new Promise(r => setTimeout(r, 250)); }
+      backend.emit({ ...backend.message(18700 + i, `空草稿挂机消息 ${i} ` + '长消息自动换行测试'.repeat(i % 3 === 0 ? 100 : 1)), group_id: 20002 });
+      await until(() => editor.document.getText().includes(`空草稿挂机消息 ${i} `) && !app!.native.isUpdating(editor.document));
+      await new Promise(r => setTimeout(r, 350));
+      const gap = await ui.evaluate(`(() => {
+        const root = document.querySelector('.editor-group-container.active .monaco-editor');
+        const row = [...root.querySelectorAll('.view-line')].find(e => e.textContent.includes('Enter') && e.textContent.includes('草稿'));
+        return row ? root.getBoundingClientRect().bottom - row.getBoundingClientRect().bottom : null;
+      })()`);
+      assert.ok(gap !== null && gap >= -2 && gap < 80, `空草稿挂机消息 ${i} 后发送栏底部空白 ${gap}px`);
+    }
+    idlePanel.hide(); idlePanel.dispose();
     app.store!.limit = originalLimit;
-    checks.push('达到历史上限后连续收消息，草稿保持贴底且选区不变');
+    await vscode.workspace.getConfiguration('editor', editor.document).update('scrollBeyondLastLine', undefined, vscode.ConfigurationTarget.Global, true);
+    checks.push('末行空白启用时历史裁剪不再持续上移，保留草稿选区；默认配置下空草稿与长消息换行贴底');
 
     backend.masks.set('20002', 4); await app.notifications!.refresh(true);
     backend.emit({ ...backend.message(8760), group_id: 20002, message: [{ type: 'at', data: { qq: '123456' } }, { type: 'text', data: { text: '请看一下' } }] });
@@ -346,6 +480,18 @@ export async function run(): Promise<void> {
     await until(() => editor.document.getText().includes('请看一下'));
     await new Promise(r => setTimeout(r, 250));
     assert.equal(app.tabDecoration(editor.document.uri)?.badge, '@');
+    const tabFor = (uri: vscode.Uri) => vscode.window.tabGroups.all.flatMap(g => g.tabs).find(t => t.input instanceof vscode.TabInputText && t.input.uri.toString() === uri.toString());
+    await until(() => tabFor(editor.document.uri)?.label.startsWith('@ ') === true);
+    const activeBeforeBadge = vscode.window.activeTextEditor;
+    const tabsBeforeBadge = vscode.window.tabGroups.all.flatMap(g => g.tabs).length;
+    backend.emit(backend.message(8762, '后台会话未读标签验证'));
+    await until(() => app!.store!.messages.get('group:20001')?.some(m => m.id === '8762') === true);
+    await until(() => tabFor(doc.uri)?.label.startsWith('● ') === true);
+    assert.equal(vscode.window.activeTextEditor, activeBeforeBadge, '后台未读更新不能激活其他标签');
+    assert.equal(vscode.window.tabGroups.all.flatMap(g => g.tabs).length, tabsBeforeBadge, '标记不能生成重复标签');
+    await vscode.commands.executeCommand('qq.markRead', 'group:20001');
+    await until(() => tabFor(doc.uri)?.label === app!.store!.chats.get('group:20001')!.name);
+
     assert.ok(app.trees.find(t => t.section === 'list')!.getChildren().filter(c => c.unread > 0 && allowsUnread(c)).some(c => c.key === 'group:20002'));
     await vscode.commands.executeCommand('qq.markRead', 'group:20002');
     assert.equal(app.tabDecoration(editor.document.uri), undefined);
@@ -354,10 +500,38 @@ export async function run(): Promise<void> {
     await until(() => editor.document.getText().includes('回复你的图片'));
     await new Promise(r => setTimeout(r, 250));
     assert.equal(app.tabDecoration(editor.document.uri)?.badge, '↩');
+    await until(() => tabFor(editor.document.uri)?.label.startsWith('↩ ') === true);
     assert.ok(app.trees.find(t => t.section === 'list')!.getChildren().filter(c => c.unread > 0 && allowsUnread(c)).some(c => c.key === 'group:20002'));
     await vscode.commands.executeCommand('qq.markRead', 'group:20002');
     backend.masks.set('20002', 1); await app.notifications!.refresh(true);
     checks.push('已打开聊天的未读保留、@及回复标签标记、免打扰例外提醒、主动清除');
+    const quietKey = 'group:20009';
+    app.store!.upsert(newChat('group', '20009', '免打扰提醒验证'));
+    backend.masks.set('20009', 4); await app.notifications!.ensure(quietKey, true);
+    const notified = new Set<string>(), notify = (app as any).notifyMessage.bind(app);
+    (app as any).notifyMessage = async (store: unknown, message: any) => { await notify(store, message); notified.add(message.id); };
+    try {
+      await vscode.commands.executeCommand('notifications.clearAll');
+      backend.emit({ ...backend.message(9890), group_id: 20009, message: [{ type: 'at', data: { qq: '123456' } }, { type: 'text', data: { text: 'exception-mention-probe' } }] });
+      await ui.waitFor(`document.querySelector('.notifications-toasts')?.textContent.includes('exception-mention-probe')`);
+      await vscode.commands.executeCommand('notifications.clearAll'); await until(() => notified.has('9890'));
+      for (let i = 0; i < 3; i++) backend.emit({ ...backend.message(9892+i, 'unrelated-probe-'+i), group_id: 20009 });
+      await until(() => [9892,9893,9894].every(id => notified.has(String(id))));
+      assert.equal(await ui.evaluate(`!!document.querySelector('.notifications-toasts')?.textContent.includes('unrelated-probe')`), false);
+      assert.equal(app.store!.chats.get(quietKey)!.mentioned, true, '未阅读的 @ 标记仍保留');
+      app.store!.markRead(quietKey);
+      backend.emit({ ...backend.message(9891), group_id: 20009, user_id: 123456, sender: { user_id: 123456, nickname: '我' } });
+      await until(() => app!.store!.messages.get(quietKey)?.some(m => m.id === '9891') === true);
+      backend.emit({ ...backend.message(9895), group_id: 20009, message: [{ type: 'reply', data: { id: '9891' } }, { type: 'text', data: { text: 'exception-reply-probe' } }] });
+      await ui.waitFor(`document.querySelector('.notifications-toasts')?.textContent.includes('exception-reply-probe')`);
+      await vscode.commands.executeCommand('notifications.clearAll'); await until(() => notified.has('9895'));
+      backend.emit({ ...backend.message(9896, 'unrelated-reply-probe'), group_id: 20009 });
+      await until(() => notified.has('9896'));
+      assert.equal(await ui.evaluate(`!!document.querySelector('.notifications-toasts')?.textContent.includes('unrelated-reply-probe')`), false);
+      assert.equal(app.store!.chats.get(quietKey)!.replied, true);
+    } finally { (app as any).notifyMessage = notify; app.store!.chats.delete(quietKey); app.store!.messages.delete(quietKey); }
+    checks.push('免打扰群 @/回复各提醒一次，后续普通消息不继续弹窗，原未读标记保留');
+
     const output = path.join(extension.extensionPath, '.test-output'); await fs.mkdir(output, { recursive: true });
     await vscode.commands.executeCommand('workbench.action.closePanel');
     await vscode.commands.executeCommand('notifications.clearAll');
@@ -463,7 +637,7 @@ export async function run(): Promise<void> {
       await vscode.commands.executeCommand('editor.action.hideHover');
       await new Promise(r => setTimeout(r, 300));
       const messageId = 8800 + i;
-      backend.emit({ ...backend.message(messageId), group_id: 20002, message: [{ type: 'image', data: { file: `${shape}.png`, url: backend.imageUrl + `?${shape}` } }] });
+      backend.emit({ ...backend.message(messageId), group_id: 20002, message: [{ type: 'text', data: { text: `preview-probe-${i} ` } }, { type: 'image', data: { file: `${shape}.png`, url: backend.imageUrl + `?${shape}` } }] });
       await until(() => app!.transcript!.rendered.get('group:20002')!.images.some(s => s.messageId === String(messageId)) && app!.native.historyMatches(editor.document) && !app!.native.isUpdating(editor.document));
       // The document edit resolves before the editor acknowledges selection restoration.
       await new Promise(r => setTimeout(r, 150));
@@ -483,7 +657,30 @@ export async function run(): Promise<void> {
       editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
       await new Promise(r => setTimeout(r, 300));
       assert.ok(editor.selection.active.isEqual(position), '打开悬浮前光标应保持在图片处');
-      await vscode.commands.executeCommand('editor.action.showHover', { focus: true });
+      // Drive the same mouse-hover path users take. showHover commands can be
+      // routed to the previously focused editor after split-editor activation.
+      console.log('hover target', shape, await ui.evaluate(`(() => { const root = document.querySelector('.editor-group-container.active .monaco-editor'); return { focus: document.activeElement?.className, uri: root?.getAttribute('data-uri'), lines: [...(root?.querySelectorAll('.view-line') ?? [])].filter(e => e.textContent.includes('preview')).map(e => e.textContent) }; })()`));
+      const hoverPoint = await ui.waitFor(`(() => {
+        const root = document.querySelector('.editor-group-container.active .monaco-editor');
+        const line = [...(root?.querySelectorAll('.view-line') ?? [])].find(e => e.textContent.includes('preview-probe-${i}'));
+        if (!line) return null;
+        const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT), nodes = [];
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+        const full = nodes.map(n => n.textContent).join(''), index = full.indexOf('[图');
+        if (index < 0) return null;
+        let offset = 0;
+        for (const node of nodes) {
+          if (offset + node.textContent.length > index + 1) {
+            const range = document.createRange(), start = index + 1 - offset;
+            range.setStart(node, start); range.setEnd(node, start + 1);
+            const r = range.getBoundingClientRect(); if (!r.width || !r.height) return null;
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          }
+          offset += node.textContent.length;
+        }
+        return null;
+      })()`);
+      await ui.call('Input.dispatchMouseEvent', { type: 'mouseMoved', ...hoverPoint });
       await new Promise(r => setTimeout(r, 1000));
       const debugShot = await ui.call('Page.captureScreenshot', { format: 'png' });
       await fs.writeFile(path.join(output, 'hover-debug.png'), Buffer.from(debugShot.data, 'base64'));
@@ -523,7 +720,7 @@ export async function run(): Promise<void> {
     await until(() => app!.native.draft(editor.document).includes('[图片:'));
     assert.equal(backend.sent.length, sendsBeforePicker, '选择表情不得发送 QQ 消息');
     assert.equal(app.store!.draft('group:20002').attachments.at(-1)?.sticker, true);
-    await until(() => !(app!.composer as any).view?.visible);
+    await until(() => !(app!.emojis as any).view?.visible);
     await vscode.commands.executeCommand('qq.emojis');
     await new Promise(r => setTimeout(r, 300));
     const reopened = await ui.webview();
@@ -538,7 +735,7 @@ export async function run(): Promise<void> {
     const beforeCancel = app.native.draft(editor.document);
     await reopened.key('Escape', 27);
     await until(() => vscode.window.activeTextEditor === editor);
-    await until(() => !(app!.composer as any).view?.visible);
+    await until(() => !(app!.emojis as any).view?.visible);
     assert.equal(app.native.draft(editor.document), beforeCancel);
     checks.push('精简表情面板、收藏默认页、最近使用缓存解码与排序、选择和取消自动关闭');
     checks.push('原生 / 指令补全、Enter 仅打开选择器、收藏图真实解码、方向键选择、Enter 插入与 Esc 返回');
@@ -648,12 +845,38 @@ export async function run(): Promise<void> {
     assert.ok(app.native.draft(editor.document).includes('[文件:slow-drop.txt]'));
     app.attachments!.stageFilePath = originalStage; cancellation.dispose();
     checks.push('慢文件导入与新消息并发，附件占位符和历史更新均保留');
+    await until(() => !app!.native.isImporting(editor.document) && !app!.native.isUpdating(editor.document));
+    const pasteData = new vscode.DataTransfer();
+    pasteData.set('image/png', { asFile: () => ({ name: 'slow-paste.png', data: async () => { await new Promise(r => setTimeout(r, 150)); return png; } }) } as unknown as vscode.DataTransferItem);
+    const pasteCancel = new vscode.CancellationTokenSource();
+    const pastePosition = editor.document.positionAt(editor.document.getText().length);
+    const pasteTask = app.native.paste(editor.document, [new vscode.Range(pastePosition, pastePosition)], pasteData, pasteCancel.token);
+    backend.emit({ ...backend.message(18750, '粘贴期间的新消息'), group_id: 20002 });
+    const pasteEdits = await pasteTask; assert.ok(pasteEdits?.length);
+    assert.equal(await editor.edit(edit => edit.insert(pastePosition, String(pasteEdits[0].insertText))), true);
+    await until(() => editor.document.getText().includes('粘贴期间的新消息') && !app!.native.isUpdating(editor.document));
+    assert.ok(app.native.draft(editor.document).includes('[图片:'));
+    const cachedFilesBefore = new Set(await fs.readdir(app.attachments!.folder));
+    const draftBeforeCancel = app.store!.draft('group:20002').text;
+    const cancelPosition = editor.document.positionAt(editor.document.getText().length);
+    const cancelledPaste = app.native.paste(editor.document, [new vscode.Range(cancelPosition, cancelPosition)], pasteData, pasteCancel.token);
+    pasteCancel.cancel(); assert.equal(await cancelledPaste, undefined);
+    assert.deepEqual(new Set(await fs.readdir(app.attachments!.folder)), cachedFilesBefore);
+    assert.equal(app.store!.draft('group:20002').text, draftBeforeCancel);
+    pasteCancel.dispose();
+    checks.push('慢图片粘贴与新消息并发，取消粘贴清理临时文件并保留草稿');
+
 
     backend.historyExtra = [{ ...backend.message(77705, '断线补齐测试'), group_id: 20002, time: Math.floor(Date.now() / 1000) + 1 }];
     const unreadBeforeReconnect = app.store!.chats.get('group:20002')!.unread;
-    backend.loginFailures = 1; backend.historyDelay = 150;
+    backend.loginFailures = 1; backend.historyDelay = 150; backend.listDelay = 1200;
+    const listResponsesBefore = backend.listResponses;
+    const reconnectCallsStart = backend.calls.length;
     await assert.rejects(app.connect(), /初始化/);
     await until(() => app!.ready);
+    await until(() => backend.calls.slice(reconnectCallsStart).some(c => c.action === 'get_group_msg_history' && c.params.group_id === '20002'));
+    assert.equal(backend.listResponses, listResponsesBefore, '已打开会话应在慢联系人列表响应前发起历史请求');
+    backend.listDelay = 0;
     backend.emit({ ...backend.message(77706, '补历史期间的更新消息'), group_id: 20002, time: Math.floor(Date.now() / 1000) + 2 });
     await until(() => !!app!.store!.messages.get('group:20002')?.some(m => m.id === '77705'));
     await until(() => !!app!.store!.messages.get('group:20002')?.some(m => m.id === '77706'));
@@ -661,7 +884,7 @@ export async function run(): Promise<void> {
     const afterSync = app.store!.chats.get('group:20002')!.unread;
     await app.loadHistory('group:20002', false, true);
     assert.equal(app.store!.chats.get('group:20002')!.unread, afterSync);
-    backend.historyExtra = []; backend.historyDelay = 0;
+    backend.historyExtra = []; backend.historyDelay = 0; backend.listDelay = 0;
     checks.push('初始化失败自动重试、断线补齐新消息并计入未读、重复同步去重');
     await app.store!.flush();
     await fs.writeFile(path.join(output, 'extension-result.json'), JSON.stringify({ passed: checks, simulatedSends: backend.sent.length, realSends: 0 }, null, 2));

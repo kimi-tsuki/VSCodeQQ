@@ -1,3 +1,4 @@
+import { Rendered, Span, renderTranscript } from './transcriptRenderer';
 import * as vscode from 'vscode';
 import * as fs from 'node:fs/promises';
 import { ChatStore } from './store';
@@ -5,15 +6,12 @@ import { MediaCache } from './media';
 import { AttachmentFiles } from './attachments';
 import { imagePreviewMarkup } from './imageHover';
 import { configuredCodeLanguage } from './configuration';
-import { Chat, Message, Rendered, Span, renderTranscript, splitKey } from './model';
+import { Chat, Message, splitKey } from './model';
 
-export class Transcript implements vscode.TextDocumentContentProvider, vscode.DocumentLinkProvider, vscode.HoverProvider, vscode.Disposable {
-  private emitter = new vscode.EventEmitter<vscode.Uri>();
-  readonly onDidChange = this.emitter.event;
+export class Transcript implements vscode.DocumentLinkProvider, vscode.HoverProvider, vscode.Disposable {
+  readonly historyState = new Map<string, string>();
   readonly rendered = new Map<string, Rendered>();
   private uris = new Map<string, vscode.Uri>();
-  private dirty = new Set<string>();
-  private timer?: NodeJS.Timeout;
   constructor(readonly store: ChatStore, readonly media: MediaCache, private attachments?: AttachmentFiles) {}
   uri(chat: Chat): vscode.Uri {
     let value = this.uris.get(chat.key);
@@ -35,18 +33,9 @@ export class Transcript implements vscode.TextDocumentContentProvider, vscode.Do
     if (!chat || !key) return '// 当前账号中没有这个会话，请从 QQ 列表重新打开。';
     this.uris.set(key, uri);
     const content = renderTranscript(chat, this.store.displayMessages(key), this.store.selfId, configuredCodeLanguage());
-    this.rendered.set(key, content); return content.text;
-  }
-  invalidate(key: string): void {
-    this.dirty.add(key);
-    if (!this.timer) this.timer = setTimeout(() => {
-      this.timer = undefined;
-      for (const item of this.dirty) {
-        const uri = this.uris.get(item), chat = this.store.chats.get(item);
-        if (uri && chat && renderTranscript(chat, this.store.displayMessages(item), this.store.selfId, configuredCodeLanguage()).text !== this.rendered.get(item)?.text) this.emitter.fire(uri);
-      }
-      this.dirty.clear();
-    }, 100);
+    this.rendered.set(key, content);
+    const state = this.historyState.get(key);
+    return content.text + (state && !this.store.messages.get(key)?.length ? `\n// ${state}\n` : '');
   }
   messageAt(uri: vscode.Uri, line: number): Message | undefined {
     const key = this.key(uri); if (!key) return;
@@ -99,9 +88,9 @@ export class Transcript implements vscode.TextDocumentContentProvider, vscode.Do
     const file = this.rendered.get(key)?.files.find(f => f.line === pos.line && pos.character >= f.start && pos.character <= f.end);
     if (file) {
       const message = this.store.messages.get(key)?.find(m => m.id === file.messageId);
-      const ref = message?.segments.filter(s => s.type === 'text' && s.file)[file.fileIndex];
+      const ref = message?.segments.filter(s => s.type === 'file')[file.fileIndex];
       const md = new vscode.MarkdownString();
-      if (ref?.type === 'text' && ref.file) md.appendText(`${ref.file.name}${ref.file.size ? ` · ${ref.file.size.toLocaleString()} 字节` : ''}`);
+      if (ref?.type === 'file') md.appendText(`${ref.file.name}${ref.file.size ? ` · ${ref.file.size.toLocaleString()} 字节` : ''}`);
       md.appendMarkdown(`\n\n[下载 / 另存为](command:qq.downloadFile?${encodeURIComponent(JSON.stringify([doc.uri.toString(), file.messageId, file.fileIndex]))})`);
       md.isTrusted = { enabledCommands: ['qq.downloadFile'] }; return new vscode.Hover(md);
     }
@@ -133,5 +122,5 @@ export class Transcript implements vscode.TextDocumentContentProvider, vscode.Do
   imageRanges(uri: vscode.Uri): vscode.Range[] {
     const key = this.key(uri); return (key ? this.rendered.get(key)?.images ?? [] : []).map(s => this.range(s));
   }
-  dispose(): void { clearTimeout(this.timer); this.emitter.dispose(); this.rendered.clear(); }
+  dispose(): void { this.rendered.clear(); this.uris.clear(); }
 }

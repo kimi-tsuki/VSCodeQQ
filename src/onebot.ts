@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 
+export class OneBotRequestError extends Error {
+  constructor(readonly kind: 'rejected' | 'timeout' | 'disconnected' | 'transport', message: string) { super(message); }
+}
 interface Pending { action: string; resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; }
 export class OneBotClient extends EventEmitter {
   private socket?: WebSocket;
@@ -47,7 +50,7 @@ export class OneBotClient extends EventEmitter {
           const echo = String(data.echo); const pending = this.pending.get(echo);
           if (!pending) return;
           this.pending.delete(echo); clearTimeout(pending.timer);
-          if (data.status === 'failed' || (data.retcode != null && Number(data.retcode) !== 0)) pending.reject(new Error(`NapCat ${pending.action} 请求失败 (${Number(data.retcode) || 'failed'})`));
+          if (data.status === 'failed' || (data.retcode != null && Number(data.retcode) !== 0)) pending.reject(new OneBotRequestError('rejected', `NapCat ${pending.action} 请求失败 (${Number(data.retcode) || 'failed'})`));
           else pending.resolve(data.data);
         } else if (data.post_type) this.emit('event', data);
       });
@@ -66,18 +69,18 @@ export class OneBotClient extends EventEmitter {
   }
   call<T = any>(action: string, params: Record<string, unknown> = {}, timeout = 15000): Promise<T> {
     const ws = this.socket;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('NapCat 未连接'));
+    if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new OneBotRequestError('disconnected', 'NapCat 未连接'));
     const echo = `qq-${++this.sequence}`;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(echo); reject(new Error(`NapCat 请求超时：${action}`)); }, timeout);
+      const timer = setTimeout(() => { this.pending.delete(echo); reject(new OneBotRequestError('timeout', `NapCat 请求超时：${action}`)); }, timeout);
       this.pending.set(echo, { action, resolve, reject, timer });
       ws.send(JSON.stringify({ action, params, echo }), error => {
-        if (error) { clearTimeout(timer); this.pending.delete(echo); reject(new Error('NapCat 消息发送失败')); }
+        if (error) { clearTimeout(timer); this.pending.delete(echo); reject(new OneBotRequestError('transport', 'NapCat 消息发送失败')); }
       });
     });
   }
   private failPending(): void {
-    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('NapCat 连接中断')); }
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new OneBotRequestError('disconnected', 'NapCat 连接中断')); }
     this.pending.clear();
   }
   disconnect(): void {

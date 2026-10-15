@@ -1,7 +1,8 @@
+import { renderTranscript } from '../src/transcriptRenderer';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { OneBotClient } from '../src/onebot';
-import { chatKey, newChat, parseMessage, renderTranscript } from '../src/model';
+import { chatKey, newChat, parseMessage } from '../src/model';
 import { MediaCache } from '../src/media';
 import { groupNotification } from '../src/notifications';
 

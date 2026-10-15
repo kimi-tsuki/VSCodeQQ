@@ -3,35 +3,33 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ChatStore } from './store';
-import { Attachment, inline, messageText } from './model';
+import { Attachment } from './model';
 import { AttachmentFiles, basicFaces } from './attachments';
 import { OneBotClient } from './onebot';
 import { Transcript } from './transcript';
 import { imageExtension } from './media';
 import { RecentEmoji, rememberEmoji } from './recentEmojis';
 
-export interface ComposerHost {
+export interface EmojiPickerHost {
   store?: ChatStore; target?: string; ready: boolean;
   attachments?: AttachmentFiles; client: OneBotClient; transcript?: Transcript;
-  sendMessage(key: string, text: string, replyId?: string): Promise<boolean>;
   checkRead(): void;
   attachToDraft(key: string, attachments: Attachment[]): Promise<void>;
   focusInput(): Promise<void>;
 }
-export class Composer implements vscode.WebviewViewProvider {
+export class EmojiPicker implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
-  private edits = new Map<string, number>();
   private favoriteSources = new Map<string, { url?: string; file?: string; account: string }>();
   private favoriteRequest = 0;
   private choosing = false;
   focused = false;
   private wantEmojis = false;
   private webviewReady = false;
-  constructor(private context: vscode.ExtensionContext, private host: ComposerHost) {}
+  constructor(private context: vscode.ExtensionContext, private host: EmojiPickerHost) {}
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     this.webviewReady = false;
-    this.edits.clear(); this.favoriteSources.clear();
+    this.favoriteSources.clear();
     const webview = view.webview;
     const media = vscode.Uri.joinPath(this.context.extensionUri, 'media');
     webview.options = { enableScripts: true, localResourceRoots: [media, this.context.globalStorageUri] };
@@ -50,35 +48,7 @@ export class Composer implements vscode.WebviewViewProvider {
     const store = this.host.store, files = this.host.attachments;
     if (!store || data?.account !== store.selfId || typeof data.key !== 'string' || !store.chats.has(data.key)) return;
     const key: string = data.key;
-    if (data.type === 'draft' && typeof data.text === 'string' && data.text.length <= 65536) {
-      const version = Number(data.editVersion) || 0;
-      if (version < (this.edits.get(key) ?? 0)) return;
-      this.edits.set(key, version);
-      store.setDraft(key, data.text, store.draft(key).replyId);
-    } else if (data.type === 'cancelReply') {
-      store.setDraft(key, store.draft(key).text); this.update();
-    } else if (data.type === 'send' && typeof data.text === 'string' && data.text.length <= 65536) {
-      try { await this.host.sendMessage(key, store.draft(key).text, store.draft(key).replyId); this.update(); }
-      finally { this.post({ type: 'sent', account: store.selfId, key }); }
-    } else if (data.type === 'pickImages' && files) {
-      const uris = await vscode.window.showOpenDialog({ canSelectMany: true, title: '选择要发送的图片', filters: { '图片': ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] } });
-      if (!uris?.length || store !== this.host.store) return;
-      if (uris.length > 8) throw new Error('每条消息最多附带 8 个图片或表情');
-      const attachments = [];
-      for (const uri of uris) {
-        if ((await fs.stat(uri.fsPath)).size > 16 * 1024 * 1024) throw new Error('单张图片不能超过 16 MB');
-        attachments.push(await files.stage(await fs.readFile(uri.fsPath), path.basename(uri.fsPath)));
-      }
-      if (store !== this.host.store) return;
-      await this.host.attachToDraft(key, attachments); this.update();
-    } else if (data.type === 'pasteImage' && files && typeof data.base64 === 'string') {
-      if (data.base64.length > 24 * 1024 * 1024 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data.base64)) throw new Error('剪贴板图片过大或格式无效');
-      const attachment = await files.stage(Buffer.from(data.base64, 'base64'), '粘贴的图片');
-      if (store !== this.host.store) return;
-      await this.host.attachToDraft(key, [attachment]); this.update();
-    } else if (data.type === 'removeAttachment' && typeof data.id === 'string') {
-      store.removeAttachment(key, data.id); this.update();
-    } else if (data.type === 'basicFace') {
+    if (data.type === 'basicFace') {
       const face = basicFaces.find(face => face.id === data.id); if (!face) return;
       if (this.choosing) return;
       this.choosing = true;
@@ -157,14 +127,8 @@ export class Composer implements vscode.WebviewViewProvider {
     const store = this.host.store;
     const key = this.host.target;
     const chat = key && store?.chats.get(key);
-    const draft = key ? store?.draft(key) : undefined;
-    const reply = draft?.replyId && store?.messages.get(key!)?.find(m => m.id === draft.replyId);
-    void this.view.webview.postMessage({ type: 'state', account: store?.selfId, key,
-      name: chat ? `${chat.name}（${chat.type === 'group' ? '群' : '好友'} ${chat.id}）` : '',
-      ready: this.host.ready, text: draft?.text ?? '', replyId: draft?.replyId, editVersion: key ? this.edits.get(key) ?? 0 : 0,
-      attachments: (draft?.attachments ?? []).filter(a => !a.placeholder || draft!.text.includes(a.placeholder)).map(a => ({ id: a.id, kind: a.kind, label: a.placeholder ? `${a.placeholder} ${a.label}` : a.label })),
-      replyPreview: reply ? `${inline(reply.senderName)}：${inline(messageText(reply)).slice(0, 120)}` : draft?.replyId ? `消息 ${draft.replyId}` : ''
-    });
+    this.post({ type: 'state', account: store?.selfId, key,
+      name: chat ? `${chat.name}（${chat.type === 'group' ? '群' : '好友'} ${chat.id}）` : '', ready: this.host.ready });
   }
   async focus(): Promise<void> { await this.host.focusInput(); }
   async showEmojis(): Promise<void> {

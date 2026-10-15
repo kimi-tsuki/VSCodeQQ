@@ -3,7 +3,7 @@ import { Chat } from './model';
 import { ChatStore } from './store';
 import { allowsUnread } from './notifications';
 export type Section = 'list' | 'favorites';
-export class ChatTree implements vscode.TreeDataProvider<Chat>, vscode.Disposable {
+export class ChatTree implements vscode.Disposable {
   private emitter = new vscode.EventEmitter<Chat | undefined>();
   readonly onDidChangeTreeData = this.emitter.event;
   private timer?: NodeJS.Timeout;
@@ -13,9 +13,9 @@ export class ChatTree implements vscode.TreeDataProvider<Chat>, vscode.Disposabl
   refresh(): void {
     if (!this.timer) this.timer = setTimeout(() => { this.timer = undefined; this.emitter.fire(undefined); }, 150);
   }
-  getChildren(): Chat[] {
+  getChildren(filter = this.filter): Chat[] {
     const store = this.getStore(); if (!store) return [];
-    const terms = this.filter.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const terms = filter.toLocaleLowerCase().split(/\s+/).filter(Boolean);
     return [...store.chats.values()].filter(chat => {
       if (!terms.every(term => `${chat.name} ${chat.remark ?? ''} ${chat.nickname ?? ''} ${chat.id}`.toLocaleLowerCase().includes(term))) return false;
       switch (this.section) {

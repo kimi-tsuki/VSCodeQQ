@@ -1,6 +1,7 @@
+import { codeString } from './transcriptRenderer';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
-import { attachmentPattern, Attachment, codeString, inline, messageText } from './model';
+import { attachmentPattern, Attachment, inline, messageText } from './model';
 import { ChatStore } from './store';
 import { Transcript } from './transcript';
 import { AttachmentFiles } from './attachments';
@@ -104,7 +105,9 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     }
     this.buffers.set(doc.uri.toString(), Buffer.from(doc.getText(), 'utf8'));
     const region = this.region(doc);
-    if (region && region.text !== store.draft(key).text) store.setDraft(key, region.text, store.draft(key).replyId);
+    // A programmatic render may finish after a newer draft was queued. Its
+    // document event must not write that older snapshot back into the store.
+    if (!internal && region && region.text !== store.draft(key).text) store.setDraft(key, region.text, store.draft(key).replyId);
     clearTimeout(this.saveTimers.get(uri));
     this.saveTimers.set(uri, setTimeout(() => {
       this.saveTimers.delete(uri); if (!doc.isClosed && doc.isDirty) void doc.save();
@@ -137,35 +140,51 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
       restore ||= this.repairs.has(uri);
       const region = this.region(doc);
       if (!region && !restore) return;
-      if (history || restore) this.host.beforeHistoryChange(doc.uri);
-      const prefix = history || restore ? this.prefix(doc.uri, key) : doc.getText().slice(0, region!.start);
-      const draft = store.draft(key).text;
-      if (doc.getText() === prefix + draft) { this.repairs.delete(uri); if (history || restore) this.host.afterHistoryChange(doc, false); return; }
-      this.expectedEdits.set(uri, prefix + draft);
-      const applied = await editor.edit(edit => {
-        if (restore) edit.replace(new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), prefix + draft);
-        else {
-          if (region!.text !== draft) edit.replace(new vscode.Range(doc.positionAt(region!.start), doc.positionAt(doc.getText().length)), draft);
-          const oldPrefix = doc.getText().slice(0, region!.start);
-          if (oldPrefix !== prefix) {
-            // Keep unchanged history in the editor model so its scroll anchor survives.
-            let start = 0, oldEnd = oldPrefix.length, newEnd = prefix.length;
-            while (start < oldEnd && start < newEnd && oldPrefix[start] === prefix[start]) start++;
-            while (oldEnd > start && newEnd > start && oldPrefix[oldEnd - 1] === prefix[newEnd - 1]) { oldEnd--; newEnd--; }
-            edit.replace(new vscode.Range(doc.positionAt(start), doc.positionAt(oldEnd)), prefix.slice(start, newEnd));
+      const transcript = this.host.transcript!;
+      const previousRendered = transcript.rendered.get(key), previousPrefix = this.prefixes.get(uri);
+      const changesHistory = history || restore;
+      let committed = false, appliedChange = false;
+      if (changesHistory) this.host.beforeHistoryChange(doc.uri);
+      try {
+        const prefix = history || restore ? this.prefix(doc.uri, key) : doc.getText().slice(0, region!.start);
+        const draft = store.draft(key).text;
+        if (doc.getText() === prefix + draft) { committed = true; this.repairs.delete(uri); return; }
+        this.expectedEdits.set(uri, prefix + draft);
+        const applied = await editor.edit(edit => {
+          if (restore) edit.replace(new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), prefix + draft);
+          else {
+            if (region!.text !== draft) edit.replace(new vscode.Range(doc.positionAt(region!.start), doc.positionAt(doc.getText().length)), draft);
+            const oldPrefix = doc.getText().slice(0, region!.start);
+            if (oldPrefix !== prefix) {
+              // Keep unchanged history in the editor model so its scroll anchor survives.
+              let start = 0, oldEnd = oldPrefix.length, newEnd = prefix.length;
+              while (start < oldEnd && start < newEnd && oldPrefix[start] === prefix[start]) start++;
+              while (oldEnd > start && newEnd > start && oldPrefix[oldEnd - 1] === prefix[newEnd - 1]) { oldEnd--; newEnd--; }
+              edit.replace(new vscode.Range(doc.positionAt(start), doc.positionAt(oldEnd)), prefix.slice(start, newEnd));
+            }
           }
+        }, { undoStopBefore: false, undoStopAfter: false });
+        committed = applied; appliedChange = applied;
+        if (applied) this.repairs.delete(uri);
+        else this.expectedEdits.delete(uri);
+        if (!applied) this.schedule(key, history);
+      } finally {
+        if (!committed) {
+          this.expectedEdits.delete(uri);
+          if (previousPrefix === undefined) this.prefixes.delete(uri); else this.prefixes.set(uri, previousPrefix);
+          if (previousRendered === undefined) transcript.rendered.delete(key); else transcript.rendered.set(key, previousRendered);
         }
-      }, { undoStopBefore: false, undoStopAfter: false });
-      if (history || restore) this.host.afterHistoryChange(doc, applied);
-      if (applied) this.repairs.delete(uri);
-      else this.expectedEdits.delete(uri);
-      if (!applied) this.schedule(key, history);
+        if (changesHistory) this.host.afterHistoryChange(doc, committed && appliedChange);
+      }
     });
     this.updating.set(uri, task);
     try { await task; } finally { if (this.updating.get(uri) === task) this.updating.delete(uri); }
   }
   isImporting(doc: vscode.TextDocument): boolean { return this.importing.has(doc.uri.toString()); }
-  isUpdating(doc: vscode.TextDocument): boolean { return this.updating.has(doc.uri.toString()); }
+  isUpdating(doc: vscode.TextDocument): boolean {
+    const key = this.host.transcript?.key(doc.uri);
+    return this.updating.has(doc.uri.toString()) || !!key && this.pending.has(key);
+  }
   async focus(editor: vscode.TextEditor): Promise<void> {
     const region = this.region(editor.document);
     if (!region) throw new Error('草稿分隔线被修改，请使用“QQ: 重建聊天文档”（恢复已缓存草稿）');
@@ -190,7 +209,10 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     const selection = this.inDraft(editor) ? editor.selection : new vscode.Selection(editor.document.positionAt(editor.document.getText().length), editor.document.positionAt(editor.document.getText().length));
     const applied = await editor.edit(edit => edit.replace(selection, prepared.map(a => a.placeholder).join('')));
     if (!applied) throw new Error('文档在导入时发生变化，请重试');
-    await vscode.window.showTextDocument(editor.document, editor.viewColumn); this.updateContext();
+    if (vscode.window.activeTextEditor?.document !== editor.document || vscode.window.activeTextEditor?.viewColumn !== editor.viewColumn) {
+      await vscode.window.showTextDocument(editor.document, editor.viewColumn);
+    }
+    this.updateContext();
   }
   private attachmentAt(doc: vscode.TextDocument, pos: vscode.Position): { attachment: Attachment; range: vscode.Range } | undefined {
     const key = this.host.transcript?.key(doc.uri), region = this.region(doc);
@@ -225,12 +247,27 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     }
     return result;
   }
+  private beginImport(doc: vscode.TextDocument, key: string) {
+    const uri = doc.uri.toString();
+    if (this.importing.has(uri)) throw new Error('请等待当前附件导入完成');
+    const operation: { placeholders?: string[] } = {};
+    this.importing.set(uri, operation);
+    return {
+      operation,
+      finish: () => {
+        // Keep history stable until VS Code applies the returned paste/drop edit.
+        const timer = setTimeout(() => {
+          this.importTimers.delete(timer);
+          if (this.importing.get(uri) === operation) { this.importing.delete(uri); this.schedule(key, true); }
+        }, 250);
+        this.importTimers.add(timer);
+      }
+    };
+  }
   async drop(doc: vscode.TextDocument, position: vscode.Position, data: vscode.DataTransfer, token: vscode.CancellationToken): Promise<vscode.DocumentDropEdit | undefined> {
     const key = this.host.transcript?.key(doc.uri), region = this.region(doc), store = this.host.store, files = this.host.attachments;
     if (!key || !region || !store || !files || doc.offsetAt(position) < region.start) return;
-    const version = doc.version, documentKey = doc.uri.toString();
-    const operation: { placeholders?: string[] } = {};
-    this.importing.set(documentKey, operation);
+    const version = doc.version, { operation, finish } = this.beginImport(doc, key);
     const attachments: Attachment[] = [], seen = new Set<string>();
     try {
       const normalize = (value: string | vscode.Uri): vscode.Uri => {
@@ -265,11 +302,7 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
       operation.placeholders = prepared.map(a => a.placeholder!);
       return new vscode.DocumentDropEdit(prepared.map(a => a.placeholder).join(''), '作为 QQ 文件附件插入', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file'));
     } catch (error) { await files.discard(attachments); throw error; }
-    finally {
-      // Let VS Code apply the returned drop edit before refreshing history.
-      const timer = setTimeout(() => { this.importTimers.delete(timer); if (this.importing.get(documentKey) === operation) { this.importing.delete(documentKey); this.schedule(key, true); } }, 250);
-      this.importTimers.add(timer);
-    }
+    finally { finish(); }
   }
   async paste(doc: vscode.TextDocument, ranges: readonly vscode.Range[], data: vscode.DataTransfer, token: vscode.CancellationToken): Promise<vscode.DocumentPasteEdit[] | undefined> {
     const key = this.host.transcript?.key(doc.uri), region = this.region(doc), store = this.host.store, files = this.host.attachments;
@@ -277,17 +310,33 @@ export class NativeEditor implements vscode.FileSystemProvider, vscode.Disposabl
     const images = [...data].filter(([mime, item]) => mime.startsWith('image/') && item.asFile());
     if (!images.length) return;
     if (ranges.length !== 1) throw new Error('粘贴图片时请只保留一个光标');
+    const version = doc.version, { operation, finish } = this.beginImport(doc, key);
     const attachments: Attachment[] = [];
-    // Clipboard formats often contain alternative representations of the same image.
-    const file = (images.find(([mime]) => mime === 'image/png') ?? images[0])[1].asFile()!;
-    attachments.push(await files.stage(Buffer.from(await file.data()), file.name || '粘贴的图片'));
-    if (token.isCancellationRequested || store !== this.host.store) return;
-    const prepared = store.prepareAttachments(key, attachments);
-    return [new vscode.DocumentPasteEdit(prepared.map(a => a.placeholder).join(''), '作为 QQ 图片占位符粘贴', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'image'))];
+    try {
+      // Clipboard formats can be alternative representations of one image.
+      const file = (images.find(([mime]) => mime === 'image/png') ?? images[0])[1].asFile()!;
+      attachments.push(await files.stage(Buffer.from(await file.data()), file.name || '粘贴的图片'));
+      if (token.isCancellationRequested || store !== this.host.store || doc.version !== version || doc.isClosed) {
+        await files.discard(attachments); return;
+      }
+      const prepared = store.prepareAttachments(key, attachments);
+      operation.placeholders = prepared.map(a => a.placeholder!);
+      return [new vscode.DocumentPasteEdit(prepared.map(a => a.placeholder).join(''), '作为 QQ 图片占位符粘贴', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'image'))];
+    } catch (error) { await files.discard(attachments); throw error; }
+    finally { finish(); }
   }
-  dispose(): void {
-    for (const timer of this.importTimers) clearTimeout(timer); this.importing.clear();
-    clearTimeout(this.timer); for (const timer of this.saveTimers.values()) clearTimeout(timer);
-    this.events.dispose(); this.buffers.clear();
+
+  release(doc: vscode.TextDocument): void {
+    const uri = doc.uri.toString();
+    clearTimeout(this.saveTimers.get(uri)); this.saveTimers.delete(uri);
+    this.buffers.delete(uri); this.prefixes.delete(uri); this.expectedEdits.delete(uri); this.repairs.delete(uri);
   }
+  reset(): void {
+    clearTimeout(this.timer); this.timer = undefined; this.pending.clear();
+    for (const timer of this.saveTimers.values()) clearTimeout(timer);
+    for (const timer of this.importTimers) clearTimeout(timer);
+    this.saveTimers.clear(); this.importTimers.clear(); this.importing.clear();
+    this.buffers.clear(); this.prefixes.clear(); this.expectedEdits.clear(); this.repairs.clear();
+  }
+  dispose(): void { this.reset(); this.events.dispose(); }
 }

@@ -1,10 +1,12 @@
+import './architecture';
+import { renderTranscript } from '../src/transcriptRenderer';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { once } from 'node:events';
-import { newChat, parseMessage, renderTranscript, messageText, mergeMessages, draftParts } from '../src/model';
+import { newChat, parseMessage, messageText, mergeMessages, draftParts } from '../src/model';
 import { OneBotClient } from '../src/onebot';
 import { ChatStore } from '../src/store';
 import { MediaCache, imageExtension, previewDimensions } from '../src/media';

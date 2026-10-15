@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { CodeLanguage, codeStyle } from './codeStyle';
 
 export type ChatType = 'group' | 'private';
 export interface Chat {
@@ -12,7 +11,26 @@ export interface Chat {
 }
 export interface ImageRef { file: string; url?: string; }
 export interface FileRef { id: string; name: string; url?: string; busid?: number; size?: number; }
-export type Segment = { type: 'text'; text: string; at?: string; atName?: string; file?: FileRef } | { type: 'image'; image: ImageRef };
+export type Segment =
+  | { type: 'text'; text: string }
+  | { type: 'mention'; qq: string; name?: string; text: string }
+  | { type: 'file'; file: FileRef; text: string }
+  | { type: 'face'; id: string; text: string }
+  | { type: 'image'; image: ImageRef };
+// Read v2 caches without guessing identities from ordinary text like "@123".
+export function normalizeSegments(segments: unknown[]): Segment[] {
+  return segments.flatMap<Segment>(value => {
+    if (!value || typeof value !== 'object') return [];
+    const s = value as Record<string, any>;
+    if (s.type === 'image' && s.image && typeof s.image.file === 'string') return [{ type: 'image', image: s.image }];
+    if (typeof s.text !== 'string') return [];
+    if ((s.type === 'file' || s.type === 'text') && s.file && typeof s.file.name === 'string') return [{ type: 'file', file: s.file, text: s.text }];
+    const qq = s.type === 'mention' ? s.qq : s.type === 'text' ? s.at : undefined;
+    if (typeof qq === 'string') return [{ type: 'mention', qq, name: s.name ?? s.atName, text: s.text }];
+    if (s.type === 'face' && typeof s.id === 'string') return [{ type: 'face', id: s.id, text: s.text }];
+    return [{ type: 'text', text: s.text }];
+  });
+}
 export interface Message {
   id: string; chatKey: string; senderId: string; senderName: string;
   time: number; segments: Segment[]; replyId?: string; mentioned: boolean; replyToSelf?: boolean;
@@ -100,16 +118,17 @@ export function parseMessage(raw: any, key?: string, selfId = ''): Message {
       case 'text': result.segments.push({ type: 'text', text: String(data.text ?? '').replace(/\r\n?/g, '\n').replace(/\0/g, '') }); break;
       case 'file': {
         const name = inline(data.name || data.file_name || '文件');
-        result.segments.push({ type: 'text', text: `[文件:${name}]`, file: { id: id(data.file_id ?? data.file), name, url: typeof data.url === 'string' ? data.url : undefined, busid: Number(data.busid ?? data.bus_id) || undefined, size: Number(data.size ?? data.file_size) || undefined } });
+        result.segments.push({ type: 'file', text: `[文件:${name}]`, file: { id: id(data.file_id ?? data.file), name, url: typeof data.url === 'string' ? data.url : undefined, busid: Number(data.busid ?? data.bus_id) || undefined, size: Number(data.size ?? data.file_size) || undefined } });
         const fileId = id(data.file_id ?? data.file); if (fileId) (result.fileIds ??= []).push(fileId);
         break;
       }
       case 'image': result.segments.push({ type: 'image', image: { file: String(data.file ?? data.file_id ?? ''), url: typeof data.url === 'string' ? data.url : undefined } }); break;
+      case 'face': result.segments.push({ type: 'face', id: id(data.id), text: `[表情:${inline(data.id)}]` }); break;
       case 'reply': result.replyId = id(data.id) || undefined; break;
       case 'at': {
         const qq = id(data.qq);
         result.mentioned ||= qq === selfId || qq === 'all';
-        result.segments.push({ type: 'text', at: qq, atName: inline(data.name) || undefined, text: qq === 'all' ? '@全体成员' : `@${inline(data.name || qq)}` });
+        result.segments.push({ type: 'mention', qq, name: inline(data.name) || undefined, text: qq === 'all' ? '@全体成员' : `@${inline(data.name || qq)}` });
         break;
       }
       default: {
@@ -120,7 +139,7 @@ export function parseMessage(raw: any, key?: string, selfId = ''): Message {
   }
   return result;
 }
-export const messageText = (message: Message): string => message.segments.map(s => s.type === 'text' ? s.text : '[图片]').join('');
+export const messageText = (message: Message): string => message.segments.map(s => s.type === 'image' ? '[图片]' : s.text).join('');
 export const isPending = (m: Message): boolean => !!m.outgoing && !['sent', 'cancelled'].includes(m.sendState ?? '');
 export function mergeMessages(history: Message[], live: Message[], limit: number): Message[] {
   const values = new Map<string, Message>();
@@ -128,92 +147,4 @@ export function mergeMessages(history: Message[], live: Message[], limit: number
   const sorted = [...values.values()].sort((a, b) => a.time - b.time);
   const retained = sorted.filter(m => !isPending(m)).slice(-limit);
   return [...retained, ...sorted.filter(isPending)].sort((a, b) => a.time - b.time);
-}
-
-export interface Span { line: number; start: number; end: number; messageId: string; imageIndex: number; }
-export interface Rendered { text: string; images: Span[]; files: { line: number; start: number; end: number; messageId: string; fileIndex: number }[]; actions: { line: number; start: number; messageId: string; kind: 'reply' | 'retry' | 'cancel' }[]; messages: Map<number, string>; starts: Map<string, number>; ownLines: number[]; attentionLines: number[]; mentionLines: number[]; replyLines: number[]; }
-// Escape only the display projection; copy/reply/send continue using the original message.
-export const codeString = (text: string): string => JSON.stringify(text).slice(1, -1)
-  .replace(/[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-export function renderTranscript(chat: Chat, messages: Message[], selfId: string, language: CodeLanguage = 'c'): Rendered {
-  const style = codeStyle(language);
-  const escape = (text: string) => style.escape(codeString(text));
-  const quote = (text: string) => `"${escape(text)}"`;
-  const lines = [style.constant('CHAT_NAME', [quote(chat.name)]), style.constant(chat.type === 'group' ? 'GROUP_ID' : 'FRIEND_ID', [quote(chat.id)]), `${style.comment} 底部草稿 Enter 发送 · Shift/Ctrl+Enter 换行 · 右键回复 · 图片悬浮预览`, ''];
-  const rendered: Rendered = { text: '', images: [], files: [], actions: [], messages: new Map(), starts: new Map(), ownLines: [], attentionLines: [], mentionLines: [], replyLines: [] };
-  const byId = new Map(messages.map(m => [m.id, m]));
-  let lastDay = '';
-  for (const m of messages) {
-    const date = new Date(m.time * 1000);
-    const day = Number.isFinite(date.getTime()) ? date.toLocaleDateString('zh-CN') : '';
-    if (day && day !== lastDay) { lines.push(`${style.comment} ── ${day} ──`, ''); lastDay = day; }
-    const start = lines.length;
-    rendered.starts.set(m.id, start);
-    const stamp = Number.isFinite(date.getTime()) ? date.toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
-    const self = m.senderId === selfId;
-    const target = m.replyId ? byId.get(m.replyId) : undefined;
-    const tags = [self ? '我' : '', m.senderRole === 'owner' ? '群主' : m.senderRole === 'admin' ? '管理员' : '', !self && m.mentioned ? '@我' : '', !self && (m.replyToSelf || target?.senderId === selfId) ? '回复我' : ''].filter(Boolean);
-    const sender = quote(m.senderName);
-    let state = m.sendState ? ({ queued: '等待发送…', sending: '发送中…', sent: '✓ 已发送', failed: '发送失败 · [重试]', uncertain: '结果未确认 · [重试]', cancelled: '已取消' })[m.sendState] : '';
-    if (m.sendState === 'sending' && m.sendProgress) {
-      const p = m.sendProgress, percent = p.total ? Math.min(100, Math.floor(p.sent / p.total * 100)) : 0;
-      const filled = Math.floor(percent / 10);
-      state = p.stage === 'confirm' ? '文件已传至 NapCat · 等待 QQ 确认…' : `上传到 NapCat [${'█'.repeat(filled)}${'░'.repeat(10 - filled)}] ${percent}% · ${(p.sent / 1048576).toFixed(1)}/${(p.total / 1048576).toFixed(1)} MB${p.bytesPerSecond ? ` · ${(p.bytesPerSecond / 1048576).toFixed(2)} MB/s` : ''}`;
-    }
-    lines.push(style.constant('INFO', [quote(m.senderTitle || ''), sender, quote(stamp)]));
-    const details: string[] = [];
-    if (m.senderRemark && m.senderRemark !== m.senderName) details.push(`备注：${inline(m.senderRemark)}`);
-    if (m.senderNickname && m.senderNickname !== m.senderName && m.senderNickname !== m.senderRemark) details.push(`昵称：${inline(m.senderNickname)}`);
-    if (details.length) lines.push(`${style.comment} ${details.join(' · ')}`);
-    const fn = self ? (m.replyId ? 'send_reply' : 'send') : (m.replyId ? 'reply' : 'recv');
-    lines.push(`${style.function(`${fn}_${/^\d+$/.test(m.senderId) ? m.senderId : 'unknown'}`)}${tags.length ? `  ${style.comment} ${tags.join(' · ')}` : ''}`);
-    if (m.replyId) {
-      let replay = style.string('replay');
-      if (target) {
-        replay += escape(`${target.senderName}：`);
-        let remaining = 160, replyImageIndex = 0, truncated = false;
-        for (const part of target.segments) {
-          if (part.type === 'image') {
-            rendered.images.push({ line: lines.length, start: replay.length, end: replay.length + 4, messageId: target.id, imageIndex: replyImageIndex++ });
-            replay += '[图片]';
-          } else {
-            replay += escape(part.text.slice(0, remaining));
-            if (part.text.length > remaining && !truncated) { replay += '…'; truncated = true; }
-            remaining = Math.max(0, remaining - part.text.length);
-          }
-        }
-      } else replay += escape(`回复消息 ${m.replyId}（未加载）`);
-      lines.push(replay + style.stringEnd);
-    }
-    let current = style.string('msg');
-    let imageIndex = 0, fileIndex = 0;
-    for (const part of m.segments) {
-      if (part.type === 'image') {
-        rendered.images.push({ line: lines.length, start: current.length, end: current.length + 4, messageId: m.id, imageIndex: imageIndex++ });
-        current += '[图片]';
-      } else {
-        if (part.file) rendered.files.push({ line: lines.length, start: current.length, end: current.length + escape(part.text).length, messageId: m.id, fileIndex: fileIndex++ });
-        const parts = part.text.split('\n');
-        current += escape(parts[0]);
-        for (const next of parts.slice(1)) { lines.push(current + '\\n"' + style.join); current = style.continuation + escape(next); }
-      }
-    }
-    current += style.stringEnd;
-    if (/^-?\d+$/.test(m.id) && m.id !== '0') {
-      current += `  ${style.comment} [回复]`;
-      rendered.actions.push({ line: lines.length, start: current.lastIndexOf('[回复]'), messageId: m.id, kind: 'reply' });
-    }
-    lines.push(current);
-    const ending = `${style.ending}${state ? `  ${style.comment} ${state}` : ''}`;
-    if (ending.includes('[重试]')) rendered.actions.push({ line: lines.length, start: ending.indexOf('[重试]'), messageId: m.id, kind: 'retry' });
-    const cancellable = m.sendState === 'queued' || (m.sendState === 'sending' && m.sendProgress?.stage === 'upload');
-    const footer = ending + (cancellable ? ' · [取消]' : '');
-    if (cancellable) rendered.actions.push({ line: lines.length, start: footer.indexOf('[取消]'), messageId: m.id, kind: 'cancel' });
-    lines.push(footer);
-    for (let line = start; line < lines.length; line++) { rendered.messages.set(line, m.id); if (self) rendered.ownLines.push(line); else if (m.mentioned || m.replyToSelf || target?.senderId === selfId) { rendered.attentionLines.push(line); (m.mentioned ? rendered.mentionLines : rendered.replyLines).push(line); } }
-    lines.push('');
-  }
-  if (!messages.length) lines.push(`${style.comment} 暂无消息，正在读取历史或等待新消息。`);
-  rendered.text = lines.join('\n');
-  return rendered;
 }

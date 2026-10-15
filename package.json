@@ -2,7 +2,7 @@
   "name": "vscode-qq",
   "displayName": "QQ · Native Chat",
   "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
-  "version": "0.1.17",
+  "version": "0.2.1",
   "publisher": "rynxis",
   "license": "MIT",
   "engines": {
@@ -47,11 +47,13 @@
       "qq": [
         {
           "id": "qq.list",
-          "name": "列表"
+          "name": "列表",
+          "type": "webview"
         },
         {
           "id": "qq.favorites",
-          "name": "收藏"
+          "name": "收藏",
+          "type": "webview"
         },
         {
           "id": "qq.settings",
@@ -267,19 +269,9 @@
           "group": "navigation@3"
         },
         {
-          "command": "qq.clearSearch.list",
-          "when": "view == qq.list && qq.list.filtered",
-          "group": "navigation@4"
-        },
-        {
           "command": "qq.search.favorites",
           "when": "view == qq.favorites",
           "group": "navigation@3"
-        },
-        {
-          "command": "qq.clearSearch.favorites",
-          "when": "view == qq.favorites && qq.favorites.filtered",
-          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -375,6 +367,23 @@
           "command": "qq.clearSearch.list",
           "when": "qq.list.filtered"
         }
+      ],
+      "webview/context": [
+        {
+          "command": "qq.toggleFavorite",
+          "when": "webviewSection == qq-chat-row && (webviewId == qq.list || webviewId == qq.favorites)",
+          "group": "qq@0"
+        },
+        {
+          "command": "qq.markRead",
+          "when": "webviewSection == qq-chat-row && (webviewId == qq.list || webviewId == qq.favorites)",
+          "group": "qq@1"
+        },
+        {
+          "command": "qq.toggleIgnoreUnread",
+          "when": "webviewSection == qq-chat-row && (webviewId == qq.list || webviewId == qq.favorites)",
+          "group": "qq@2"
+        }
       ]
     },
     "keybindings": [
@@ -437,7 +446,8 @@
         "editor.dropIntoEditor.preferences": [
           "qq.file"
         ],
-        "editor.scrollBeyondLastLine": false
+        "editor.scrollBeyondLastLine": false,
+        "editor.padding.bottom": 24
       }
     },
     "configuration": {

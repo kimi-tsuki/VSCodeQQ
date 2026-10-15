@@ -29,7 +29,11 @@ export class MockNapCat {
   sendDelay = 0;
   detailDelay = 0;
   emitSent = true;
+  listDelay = 0;
+  listResponses = 0;
   historyDelay = 0;
+  historyDelays = new Map<string, number>();
+  historyFailures = new Set<string>();
   failSend = false;
   fileUploads: any[] = [];
   fileDelay = 0;
@@ -52,12 +56,15 @@ export class MockNapCat {
       const respond = (data: unknown, status = 'ok') => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ status, retcode: status === 'ok' ? 0 : 100, data, echo: req.echo })); };
       switch (req.action) {
         case 'get_login_info': if (this.loginFailures-- > 0) { respond(null, 'failed'); break; } respond({ user_id: 123456, nickname: '测试账号' }); break;
-        case 'get_friend_list': respond([{ user_id: 10001, nickname: '张三', remark: '测试好友' }]); break;
-        case 'get_group_list': respond([{ group_id: 20001, group_name: '原生界面验证群' }, { group_id: 20002, group_name: '另一个会话' }]); break;
+        case 'get_friend_list': if (this.listDelay) await new Promise(r => setTimeout(r, this.listDelay)); this.listResponses++; respond([{ user_id: 10001, nickname: '张三', remark: '测试好友' }]); break;
+        case 'get_group_list': if (this.listDelay) await new Promise(r => setTimeout(r, this.listDelay)); this.listResponses++; respond([{ group_id: 20001, group_name: '原生界面验证群' }, { group_id: 20002, group_name: '另一个会话' }]); break;
         case 'get_group_detail_info': respond({ cmdUinMsgMask: this.masks.get(String(req.params.group_id)) }); break;
         case 'get_group_member_list': if (this.memberFailures-- > 0) { respond(null, 'failed'); break; } respond([{ user_id: 10001, card: '群名片', nickname: '张三', role: 'admin', title: '调试员' }, { user_id: 123456, card: '我的名片', role: 'member' }]); break;
         case 'get_group_msg_history': case 'get_friend_msg_history': {
-          if (this.historyDelay) await new Promise(resolve => setTimeout(resolve, this.historyDelay));
+          const chat = String(req.params.group_id ?? req.params.user_id);
+          const delay = this.historyDelays.get(chat) ?? this.historyDelay;
+          if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+          if (this.historyFailures.has(chat)) { respond(null, 'failed'); break; }
           respond({ messages: [...this.history(), ...this.historyExtra] }); break;
         }
         case 'get_image': respond({ url: this.imageUrl }); break;

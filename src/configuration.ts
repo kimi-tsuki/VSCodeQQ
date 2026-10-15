@@ -1,3 +1,4 @@
+import { chatSettings, ChatSetting } from './settingsSchema';
 import * as vscode from 'vscode';
 import * as fs from 'node:fs/promises';
 import { CodeLanguage, isCodeLanguage } from './codeStyle';
@@ -13,8 +14,12 @@ export class Configuration {
   constructor(private context: vscode.ExtensionContext) {}
   get codeLanguage(): CodeLanguage { return configuredCodeLanguage(); }
   get url(): string { return vscode.workspace.getConfiguration('qq').get('wsUrl', 'ws://127.0.0.1:3001'); }
-  get historyCount(): number { return Math.max(10, Math.min(500, vscode.workspace.getConfiguration('qq').get('historyCount', 50))); }
-  get messageLimit(): number { return Math.max(50, Math.min(2000, vscode.workspace.getConfiguration('qq').get('messageLimit', 500))); }
+  get historyCount(): number { return Math.max(10, Math.min(500, vscode.workspace.getConfiguration('qq').get('historyCount', chatSettings.historyCount.default))); }
+  get messageLimit(): number { return Math.max(50, Math.min(2000, vscode.workspace.getConfiguration('qq').get('messageLimit', chatSettings.messageLimit.default))); }
+  chatOptions(): Record<ChatSetting, unknown> {
+    const settings = vscode.workspace.getConfiguration('qq');
+    return Object.fromEntries(Object.entries(chatSettings).map(([key, definition]) => [key, settings.get(key, definition.default)])) as Record<ChatSetting, unknown>;
+  }
   async token(): Promise<string> { return await this.context.secrets.get('qq.wsToken') ?? ''; }
   async saveConnection(url: string, token: string | undefined, autoConnect: boolean): Promise<void> {
     const invalid = validateUrl(url); if (invalid) throw new Error(invalid);

@@ -14,6 +14,12 @@ export function allowsUnread(chat: Chat): boolean {
   return !chat.ignoreUnread && (chat.mentioned || !!chat.replied || chat.type === 'private' || chat.notification === 'notify');
 }
 
+// Conversation flags are sticky until read. They keep the tab/list highlighted,
+// but must never grant a notification exception to later unrelated messages.
+export function allowsMessageNotification(chat: Chat, mentioned: boolean, replyToSelf: boolean): boolean {
+  return !chat.ignoreUnread && (mentioned || replyToSelf || chat.type === 'private' || chat.notification === 'notify');
+}
+
 export class NotificationSync {
   private checked = new Map<string, number>();
   private pending = new Map<string, Promise<void>>();

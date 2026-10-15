@@ -1,37 +1,45 @@
+import { languageLabels } from './settingsSchema';
+import { AttachmentImporter } from './attachmentImporter';
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { randomUUID } from 'node:crypto';
 import { OneBotClient } from './onebot';
-import { ChatStore } from './store';
+import { ChatStore, StoreChange } from './store';
 import { MediaCache } from './media';
 import { Transcript } from './transcript';
 import { ChatTree, Section } from './tree';
-import { Composer } from './composer';
+import { ChatListView } from './chatListView';
+import { HistoryQueue } from './historyQueue';
+import { ChatTabs } from './chatTabs';
+import { EmojiPicker } from './emojiPicker';
 import { Configuration } from './configuration';
 import { SettingsTree } from './settingsTree';
 import { codeLanguages } from './codeStyle';
 import { ConnectionSettings } from './settings';
 import { AttachmentFiles } from './attachments';
 import { downloadFile } from './download';
-import { uploadToNapCat } from './fileUpload';
-import { NotificationSync, allowsUnread } from './notifications';
-import { NativeEditor } from './nativeEditor';
-import { Attachment, Chat, Message, draftParts, outgoingDrafts, id, messageText, newChat, parseMessage, splitKey } from './model';
+import { OutboxService, Submission } from './outbox';
+import { AccountSession } from './accountSession';
+import { NotificationSync, allowsUnread, allowsMessageNotification } from './notifications';
+import { ChatEditorController } from './chatEditorController';
+import { Attachment, Chat, Message, id, messageText, newChat, parseMessage, splitKey } from './model';
 
-type Anchor = { messageId?: string; offset: number; character: number; draftOffset?: number };
-type ViewSnapshot = { editor: vscode.TextEditor; follow: boolean; top: Anchor; selections: { anchor: Anchor; active: Anchor }[] };
 export class QQApp implements vscode.Disposable {
   readonly client = new OneBotClient();
   readonly config: Configuration;
   readonly settings: ConnectionSettings;
-  readonly composer: Composer;
-  readonly native: NativeEditor;
+  readonly emojis: EmojiPicker;
+  readonly imports = new AttachmentImporter(this);
+  readonly editor: ChatEditorController;
+  get native() { return this.editor.native; }
   readonly trees: ChatTree[] = [];
-  private treeViews = new Map<Section, vscode.TreeView<Chat>>();
+  private listViews = new Map<Section, ChatListView>();
+  private historyQueue = new HistoryQueue();
+  private historyLoaded = new Map<string, number>();
+  private historyRequests = new Map<string, { reconnect: boolean; since: number }>();
+  private tabs: ChatTabs;
   notifications?: NotificationSync;
   private notificationTimer?: NodeJS.Timeout;
-  private filterInput?: vscode.InputBox;
   store?: ChatStore;
   transcript?: Transcript;
   attachments?: AttachmentFiles;
@@ -40,58 +48,49 @@ export class QQApp implements vscode.Disposable {
   private disposables: vscode.Disposable[] = [];
   private output = vscode.window.createOutputChannel('QQ');
   private status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
-  private imageDecoration = vscode.window.createTextEditorDecorationType({ color: new vscode.ThemeColor('textLink.foreground'), textDecoration: 'underline' });
-  private ownDecoration = vscode.window.createTextEditorDecorationType({ isWholeLine: true, backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'), borderWidth: '0 0 0 2px', borderStyle: 'solid', borderColor: new vscode.ThemeColor('editorGutter.addedBackground') });
-  private mentionDecoration!: vscode.TextEditorDecorationType;
-  private replyDecoration!: vscode.TextEditorDecorationType;
   private initializationRetry?: NodeJS.Timeout;
   private cacheTimer?: NodeJS.Timeout;
   private cleaningCache?: Promise<number>;
-  private replyLookups = new Map<string, Promise<boolean>>();
-  private cancelled = new Set<string>();
   readonly settingsTree = new SettingsTree(() => this.client.connected);
-  private memberLoaded = new Map<string, number>();
-  private memberLoading = new Map<string, Promise<void>>();
-  private following = new Map<vscode.TextEditor, boolean>();
-  private pendingMessages = new Map<string, number>();
-  private newMessagesStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 9);
-  private scrollGuards = new Map<string, NodeJS.Timeout>();
-  private snapshots = new Map<string, ViewSnapshot[]>();
-  private historyVersions = new Map<string, number>();
-  private historyCounts = new Map<string, number>();
   private importingMessageImages = new Set<string>();
   private submitting = new Set<string>();
-  private sendQueues = new Map<string, Promise<boolean>>();
   private tabChanges = new vscode.EventEmitter<vscode.Uri | undefined>();
   private queued: any[] = [];
-  private epoch = 0;
+  readonly session = new AccountSession();
+  readonly outbox: OutboxService;
+  private get epoch() { return this.session.generation; }
   private openVersion = 0;
   private initialization: Promise<void> = Promise.resolve();
   private stopped = false;
 
   constructor(readonly context: vscode.ExtensionContext) {
     this.config = new Configuration(context);
-    this.refreshHighlights();
+    this.tabs = new ChatTabs(this, error => this.log(error));
+    this.disposables.push(this.tabs);
+    const app = this;
+    this.outbox = new OutboxService({
+      get store() { return app.store; }, get attachments() { return app.attachments; },
+      client: this.client, session: this.session, get ready() { return app.ready; }, log: error => this.log(error)
+    });
+    this.editor = new ChatEditorController(this);
+    this.disposables.push(this.editor);
     this.disposables.push(vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('qq')) {
         this.settingsTree.refresh();
-        this.refreshHighlights();
+        if (e.affectsConfiguration('qq.mentionColor') || e.affectsConfiguration('qq.replyColor')) this.editor.refreshHighlights();
         if (this.store) this.store.limit = this.config.messageLimit;
-        for (const editor of vscode.window.visibleTextEditors) this.decorate(editor);
+        for (const editor of vscode.window.visibleTextEditors) this.editor.decorate(editor);
       }
     }));
     this.settings = new ConnectionSettings(context, this.config, () => this.connect(), () => this.cacheInfo(), () => this.cleanCache(true));
     this.disposables.push(this.settings);
-    this.composer = new Composer(context, this);
-    this.native = new NativeEditor(this);
+    this.emojis = new EmojiPicker(context, this);
     this.status.command = 'qq.connect'; this.status.name = 'QQ 连接'; this.status.show();
-    this.newMessagesStatus.command = 'qq.latest'; this.newMessagesStatus.name = 'QQ 新消息';
     this.disposables.push(this.tabChanges, vscode.window.registerFileDecorationProvider({
       onDidChangeFileDecorations: this.tabChanges.event,
       provideFileDecoration: uri => this.tabDecoration(uri)
     }));
-    this.disposables.push(this.output, this.status, this.imageDecoration, this.ownDecoration, this.newMessagesStatus);
-    this.disposables.push(this.native, vscode.workspace.registerFileSystemProvider('qqchat', this.native, { isCaseSensitive: true }));
+    this.disposables.push(this.output, this.status);
     const selector = { scheme: 'qqchat', language: 'qq-chat' };
     this.disposables.push(vscode.languages.registerCompletionItemProvider(selector, {
       provideCompletionItems: async (doc, position, token) => {
@@ -127,7 +126,7 @@ export class QQApp implements vscode.Disposable {
       provideDocumentLinks: doc => [...(this.native.historyMatches(doc) ? this.transcript?.provideDocumentLinks(doc) ?? [] : []), ...this.native.links(doc)]
     }), vscode.languages.registerHoverProvider(selector, {
       provideHover: async (doc, pos, token) => await this.native.hover(doc, pos) ?? (this.native.historyMatches(doc) ? this.transcript?.provideHover(doc, pos, token) : undefined)
-    }), vscode.window.registerWebviewViewProvider('qq.composer', this.composer),
+    }), vscode.window.registerWebviewViewProvider('qq.composer', this.emojis),
     vscode.languages.registerDocumentPasteEditProvider(selector, {
       provideDocumentPasteEdits: (doc, ranges, data, _context, token) => this.native.paste(doc, ranges, data, token)
     }, { pasteMimeTypes: ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'], providedPasteEditKinds: [vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'image')] }));
@@ -139,12 +138,9 @@ export class QQApp implements vscode.Disposable {
     }, { dropMimeTypes: ['text/uri-list', 'files'], providedDropEditKinds: [vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file')] }));
     for (const section of ['list', 'favorites'] as Section[]) {
       const provider = new ChatTree(section, () => this.store); this.trees.push(provider);
-      const view = vscode.window.createTreeView(`qq.${section}`, { treeDataProvider: provider, showCollapseAll: false });
-      this.treeViews.set(section, view);
-      this.disposables.push(provider, view);
-      this.disposables.push(provider.onDidChangeTreeData(() => {
-        view.message = provider.filter ? `搜索：${provider.filter} · ${provider.getChildren().length} 个结果` : undefined;
-      }));
+      const view = new ChatListView(provider, () => this.store, query => this.filterList(section, query, false));
+      this.listViews.set(section, view);
+      this.disposables.push(provider, view, vscode.window.registerWebviewViewProvider(`qq.${section}`, view));
     }
     this.disposables.push(this.settingsTree, vscode.window.createTreeView('qq.settings', { treeDataProvider: this.settingsTree, showCollapseAll: false }));
     this.commands();
@@ -156,38 +152,27 @@ export class QQApp implements vscode.Disposable {
     this.disposables.push(vscode.window.onDidChangeActiveTextEditor(editor => {
       this.native.updateContext();
       const key = editor && this.transcript?.key(editor.document.uri);
-      if (key) { this.target = key; this.composer.update(); this.decorate(editor!); this.checkRead(); }
-      this.updateNewMessages();
-    }), vscode.window.onDidChangeTextEditorVisibleRanges(({ textEditor: editor }) => {
-      if (!this.transcript?.key(editor.document.uri) || this.snapshots.has(editor.document.uri.toString()) || this.scrollGuards.has(editor.document.uri.toString())) return;
-      const bottom = this.atBottom(editor);
-      this.following.set(editor, bottom);
-      if (bottom) this.pendingMessages.delete(this.transcript.key(editor.document.uri)!);
-      this.checkRead(); this.updateNewMessages();
-    }), vscode.window.onDidChangeVisibleTextEditors(editors => {
-      for (const editor of this.following.keys()) if (!editors.includes(editor)) this.following.delete(editor);
-      for (const editor of editors) {
-        const key = this.transcript?.key(editor.document.uri);
-        if (key) this.native.schedule(key, true);
-        this.decorate(editor);
-      }
+      if (key) { this.target = key; this.emojis.update(); this.editor.decorate(editor!); this.checkRead(); void this.ensureChatLoaded(key, 0); }
     }), vscode.window.onDidChangeWindowState(() => this.checkRead()),
     vscode.window.onDidChangeTextEditorSelection(event => {
       this.native.updateContext();
       if (event.kind === vscode.TextEditorSelectionChangeKind.Keyboard || event.kind === vscode.TextEditorSelectionChangeKind.Mouse) this.checkRead();
-    }),
-    vscode.workspace.onDidChangeTextDocument(event => {
-      if (!event.contentChanges.length) return;
-      this.native.changed(event.document, event.contentChanges); this.documentChanged(event.document);
+    }));
+    this.disposables.push(vscode.window.tabGroups.onDidChangeTabs(event => {
+      this.tabs.refresh();
+      for (const tab of event.opened) if (tab.input instanceof vscode.TabInputText) {
+        const key = this.transcript?.key(tab.input.uri); if (key) void this.ensureChatLoaded(key, tab.isActive ? 0 : 1);
+      }
     }));
     this.client.on('connected', () => {
-      const epoch = ++this.epoch;
+      const epoch = this.session.advance();
+      this.historyQueue.clear(); this.historyLoaded.clear();
       clearTimeout(this.initializationRetry); this.ready = false;
       this.initialization = this.initializeWithRetry(epoch);
     });
     this.client.on('disconnected', () => {
       clearTimeout(this.initializationRetry);
-      ++this.epoch; this.ready = false; this.queued = [];
+      this.session.advance(); this.historyQueue.clear(); this.historyLoaded.clear(); this.ready = false; this.queued = [];
       this.notifications?.dispose(); clearInterval(this.notificationTimer); this.updateStatus('未连接');
     });
     this.client.on('event', event => {
@@ -224,27 +209,54 @@ export class QQApp implements vscode.Disposable {
     if (epoch !== this.epoch || this.stopped) return;
     await this.bindAccount(selfId);
     if (epoch !== this.epoch || this.stopped) return;
-    await this.refresh();
-    if (epoch !== this.epoch || this.stopped) return;
     const syncSince = new Map([...this.store!.chats.values()].map(c => [c.key, c.lastTime]));
-    this.ready = true; this.updateStatus('已连接');
-    clearInterval(this.notificationTimer);
-    this.notificationTimer = setInterval(() => { if (this.ready) void this.notifications?.refresh(); }, 60000);
+    this.ready = true;
     const queued = this.queued; this.queued = [];
     for (const event of queued) this.onEvent(event);
+    // Restored conversations already have an identity; do not make their
+    // history wait for every friend/group-list request to complete.
     void this.syncRecentHistory(epoch, syncSince).catch(error => this.log(error));
+    await this.refresh();
+    if (epoch !== this.epoch || this.stopped) return;
+    this.updateStatus('已连接');
+    clearInterval(this.notificationTimer);
+    this.notificationTimer = setInterval(() => { if (this.ready) void this.notifications?.refresh(); }, 60000);
     void this.cleanCache().catch(error => this.log(error));
     clearInterval(this.cacheTimer); this.cacheTimer = setInterval(() => { void this.cleanCache().catch(error => this.log(error)); }, 3600000);
     this.output.appendLine('NapCat 连接成功，会话列表已加载。');
   }
+  private openChatKeys(): string[] {
+    const active = vscode.window.activeTextEditor;
+    const uris = [...(active ? [active.document.uri] : []), ...vscode.window.visibleTextEditors.map(e => e.document.uri),
+      ...vscode.window.tabGroups.all.flatMap(group => group.tabs.flatMap(tab => tab.input instanceof vscode.TabInputText ? [tab.input.uri] : []))];
+    return [...new Set(uris.map(uri => this.transcript?.key(uri)).filter((key): key is string => !!key))];
+  }
+  private async ensureChatLoaded(key: string, priority = 0): Promise<void> {
+    const store = this.store; if (!store?.chats.has(key)) return;
+    try {
+      await store.load(key);
+      if (store !== this.store) return;
+      this.native.schedule(key, true);
+      if (!this.ready) return;
+      if (Date.now() - (this.historyLoaded.get(key) ?? 0) > 30000) await this.loadHistory(key, false, false, undefined, priority);
+      if (store === this.store) void this.loadMembers(key);
+    } catch (error) { this.log(error); }
+  }
   private async syncRecentHistory(epoch: number, since: Map<string, number>): Promise<void> {
     const store = this.store; if (!store) return;
-    const open = vscode.workspace.textDocuments.map(d => this.transcript?.key(d.uri)).filter((k): k is string => !!k);
+    const open = this.openChatKeys();
     const recent = [...store.chats.values()].filter(c => c.lastTime > 0).sort((a, b) => b.lastTime - a.lastTime).slice(0, 20).map(c => c.key);
-    for (const key of new Set([...open, ...recent])) {
-      if (epoch !== this.epoch || store !== this.store || !this.ready) return;
-      try { await this.loadHistory(key, false, true, since.get(key) ?? 0); } catch (error) { this.log(error); }
-    }
+    const current = () => epoch === this.epoch && store === this.store && this.ready;
+    // Local caches and first pages of open tabs take priority over deep backfill.
+    await Promise.allSettled(open.map(async (key, index) => {
+      await store.load(key); if (!current()) return;
+      this.native.schedule(key, true);
+      await this.loadHistory(key, false, true, since.get(key) ?? 0, index === 0 ? 0 : 1, this.config.historyCount);
+      if (current()) void this.loadMembers(key);
+    }));
+    if (!current()) return;
+    await Promise.allSettled([...new Set([...open, ...recent])].map(key =>
+      this.loadHistory(key, false, true, since.get(key) ?? 0, 2).catch(error => this.log(error))));
   }
   async cacheInfo(): Promise<{ bytes: number; count: number }> { return this.attachments?.cacheInfo() ?? { bytes: 0, count: 0 }; }
   async cleanCache(manual = false): Promise<number> {
@@ -259,31 +271,46 @@ export class QQApp implements vscode.Disposable {
     try { return await task; } finally { if (this.cleaningCache === task) this.cleaningCache = undefined; }
   }
   private async bindAccount(selfId: string): Promise<void> {
-    if (this.store?.selfId === selfId) return;
-    if (this.store) { this.notifications?.dispose(); await this.store.dispose(); this.transcript?.dispose(); }
-    this.replyLookups.clear();
-    this.target = undefined; this.historyVersions.clear(); this.historyCounts.clear(); this.following.clear(); this.memberLoaded.clear(); this.pendingMessages.clear(); this.updateNewMessages();
-    const folder = path.join(this.context.globalStorageUri.fsPath, 'accounts', selfId);
-    const store = new ChatStore(folder, selfId, this.config.messageLimit);
-    store.on('storageError', error => this.log(error));
-    await store.restore();
-    this.store = store;
-    this.attachments = new AttachmentFiles(path.join(folder, 'outgoing'));
-    const transcript = new Transcript(store, new MediaCache(path.join(folder, 'images'), this.client), this.attachments);
-    this.transcript = transcript;
-    transcript.onDidChange(uri => {
-      const key = transcript.key(uri); if (key) this.native.schedule(key, true);
+    const token = this.session.capture();
+    await this.session.bind(async () => {
+      if (!token.current() || this.stopped || this.store?.selfId === selfId) return;
+      if (this.store) {
+        const oldStore = this.store; this.store = undefined;
+        this.notifications?.dispose(); this.transcript?.dispose(); this.transcript = undefined;
+        await oldStore.dispose();
+      }
+      if (!token.current() || this.stopped) return;
+      this.session.clearAccount(); this.historyLoaded.clear(); this.historyQueue.clear();
+      this.target = undefined; this.editor.reset();
+      const folder = path.join(this.context.globalStorageUri.fsPath, 'accounts', selfId);
+      const store = new ChatStore(folder, selfId, this.config.messageLimit);
+      store.on('storageError', error => this.log(error));
+      await store.restore();
+      if (!token.current() || this.stopped) { await store.dispose(); return; }
+      this.store = store;
+      this.attachments = new AttachmentFiles(path.join(folder, 'outgoing'));
+      const transcript = new Transcript(store, new MediaCache(path.join(folder, 'images'), this.client), this.attachments);
+      this.transcript = transcript;
+      store.on('change', (key: string, kind: StoreChange) => {
+        if (store !== this.store) return;
+        if (kind === 'messages' || kind === 'members' || kind === 'chat') this.native.schedule(key, true);
+        if (kind !== 'members') {
+          this.trees.forEach(tree => tree.refresh());
+          const chat = store.chats.get(key); if (chat) this.tabChanges.fire(transcript.uri(chat));
+          this.tabs.refresh();
+        }
+      });
+      store.on('draft', (key, replyChanged) => { this.native.schedule(key, !!replyChanged); this.emojis.update(); });
+      await this.context.globalState.update('lastAccount', selfId);
+      this.trees.forEach(tree => tree.refresh()); this.emojis.update(); this.tabs.refresh();
+      for (const key of this.openChatKeys()) void this.ensureChatLoaded(key, 1);
     });
-    store.on('change', key => { transcript.invalidate(key); this.trees.forEach(tree => tree.refresh()); const chat = store.chats.get(key); if (chat) this.tabChanges.fire(transcript.uri(chat)); });
-    store.on('draft', (key, replyChanged) => { this.native.schedule(key, !!replyChanged); this.composer.update(); });
-    await this.context.globalState.update('lastAccount', selfId);
-    this.trees.forEach(tree => tree.refresh()); this.composer.update();
   }
   async refresh(): Promise<void> {
     if (!this.client.connected || !this.store) throw new Error('请先连接 NapCat');
-    const store = this.store;
+    const store = this.store, epoch = this.epoch;
     const [friends, groups] = await Promise.all([this.client.call('get_friend_list'), this.client.call('get_group_list')]);
-    if (store !== this.store) return;
+    if (store !== this.store || epoch !== this.epoch) return;
     for (const friend of Array.isArray(friends) ? friends : []) {
       if (/^\d+$/.test(id(friend.user_id))) store.upsert({ ...newChat('private', friend.user_id, friend.remark || friend.nickname), remark: friend.remark, nickname: friend.nickname });
     }
@@ -311,9 +338,7 @@ export class QQApp implements vscode.Disposable {
       }
       const added = store.add(message, true);
       if (added && message.senderId !== store.selfId) void this.notifyMessage(store, message);
-      if (added && message.senderId !== store.selfId && vscode.window.visibleTextEditors.some(e => this.transcript?.key(e.document.uri) === message.chatKey && this.following.get(e) === false)) {
-        this.pendingMessages.set(message.chatKey, (this.pendingMessages.get(message.chatKey) ?? 0) + 1); this.updateNewMessages();
-      }
+      if (added && message.senderId !== store.selfId) this.editor.incoming(message.chatKey);
       void this.notifications?.ensure(message.chatKey);
     } catch { this.output.appendLine('跳过一条无法识别的消息事件。'); }
   }
@@ -334,15 +359,15 @@ export class QQApp implements vscode.Disposable {
     let result: boolean;
     if (target) result = target.senderId === store.selfId;
     else {
-      let task = this.replyLookups.get(lookup);
+      let task = this.session.replyLookups.get(lookup);
       if (!task) {
         task = this.client.call('get_msg', { message_id: message.replyId }, 5000).then(raw => {
           const sender = id(raw?.sender?.user_id ?? raw?.user_id); if (!sender) throw new Error('引用消息不可用');
           return sender === store.selfId;
         });
-        this.replyLookups.set(lookup, task);
+        this.session.replyLookups.set(lookup, task);
       }
-      try { result = await task; } finally { this.replyLookups.delete(lookup); }
+      try { result = await task; } finally { if (this.session.replyLookups.get(lookup) === task) this.session.replyLookups.delete(lookup); }
     }
     if (store === this.store) {
       const current = store.messages.get(message.chatKey)?.find(m => m.id === message.id);
@@ -356,7 +381,7 @@ export class QQApp implements vscode.Disposable {
     if (store === this.store && replyToSelf) store.markReplyToSelf(key);
     await this.notifications?.ensure(key);
     const chat = store.chats.get(key);
-    if (store !== this.store || !chat?.unread || !allowsUnread(chat)) return;
+    if (store !== this.store || !chat?.unread || !allowsMessageNotification(chat, message.mentioned, replyToSelf)) return;
     if (!message.mentioned && !replyToSelf && this.isReading(key)) return;
     const mode = vscode.workspace.getConfiguration('qq').get<string>('notifications', 'all');
     if (mode === 'off' || (mode === 'mentions' && !message.mentioned && !replyToSelf)) return;
@@ -377,35 +402,48 @@ export class QQApp implements vscode.Disposable {
     if (version !== this.openVersion || store !== this.store) return;
     const editor = await vscode.window.showTextDocument(doc, { preview: false });
     await this.native.sync(editor);
-    this.target = key; this.following.set(editor, true);
-    this.latest(editor); this.decorate(editor); this.composer.update();
+    this.target = key; this.editor.follow(editor, true);
+    this.editor.latest(editor); this.editor.decorate(editor); this.emojis.update();
     await this.native.focus(editor);
-    if (this.client.connected) void this.loadHistory(key).catch(error => this.log(error));
-    if (this.client.connected && chat.type === 'group') void this.loadMembers(key);
+    void this.ensureChatLoaded(key, 0); this.tabs.refresh();
     this.checkRead();
   }
-  async loadHistory(key: string, more = false, reconnect = false, reconnectSince?: number): Promise<void> {
-    const store = this.store; if (!store) return;
-    if (more) for (const editor of vscode.window.visibleTextEditors) if (this.transcript?.key(editor.document.uri) === key) this.following.set(editor, false);
-    const lastTime = reconnectSince ?? store.chats.get(key)?.lastTime ?? 0;
+  loadHistory(key: string, more = false, reconnect = false, reconnectSince?: number, priority = 0, pageCount?: number): Promise<void> {
+    const store = this.store; if (!store || !this.ready) return Promise.resolve();
+    if (more) for (const editor of vscode.window.visibleTextEditors) if (this.transcript?.key(editor.document.uri) === key) this.editor.follow(editor, false);
+    const count = Math.min(store.limit, pageCount ?? (reconnect ? store.limit : more ? (this.session.historyCounts.get(key) ?? this.config.historyCount) + this.config.historyCount : this.config.historyCount));
     const epoch = this.epoch;
-    const version = (this.historyVersions.get(key) ?? 0) + 1; this.historyVersions.set(key, version);
+    const requestKey = `${epoch}:${key}:${count}`;
+    let request = this.historyRequests.get(requestKey);
+    if (!request) { request = { reconnect, since: reconnectSince ?? store.chats.get(key)?.lastTime ?? 0 }; this.historyRequests.set(requestKey, request); }
+    else if (reconnect) { request.reconnect = true; if (reconnectSince !== undefined) request.since = Math.min(request.since, reconnectSince); }
+    const options = request;
+    const result = this.historyQueue.request(requestKey, priority, async () => {
+      if (store !== this.store || epoch !== this.epoch || !this.ready) return;
+      this.transcript?.historyState.set(key, '正在加载聊天记录…'); this.native.schedule(key, true);
+      try {
+        await this.fetchHistory(store, key, count, epoch, options);
+        if (store === this.store && epoch === this.epoch) { this.historyLoaded.set(key, Date.now()); this.transcript?.historyState.delete(key); }
+      } catch (error) {
+        if (store === this.store && epoch === this.epoch) this.transcript?.historyState.set(key, '历史加载失败，请点击工具栏“加载更多记录”重试');
+        throw error;
+      } finally { if (store === this.store && epoch === this.epoch) this.native.schedule(key, true); }
+    });
+    return result.finally(() => { if (this.historyRequests.get(requestKey) === options) this.historyRequests.delete(requestKey); });
+  }
+  private async fetchHistory(store: ChatStore, key: string, count: number, epoch: number, options: { reconnect: boolean; since: number }): Promise<void> {
     const chat = splitKey(key);
-    const count = Math.min(store.limit, reconnect ? store.limit : more ? (this.historyCounts.get(key) ?? this.config.historyCount) + this.config.historyCount : this.config.historyCount);
-    this.historyCounts.set(key, count);
-    const data = await this.client.call(chat.type === 'group' ? 'get_group_msg_history' : 'get_friend_msg_history', { [chat.type === 'group' ? 'group_id' : 'user_id']: chat.id, count });
-    if (store !== this.store || epoch !== this.epoch || this.historyVersions.get(key) !== version) return;
+    this.session.historyCounts.set(key, Math.max(count, this.session.historyCounts.get(key) ?? 0));
+    const data = await this.client.call(chat.type === 'group' ? 'get_group_msg_history' : 'get_friend_msg_history', { [chat.type === 'group' ? 'group_id' : 'user_id']: chat.id, count }, 10000);
+    if (store !== this.store || epoch !== this.epoch) return;
     const messages: Message[] = [];
     for (const raw of Array.isArray(data?.messages) ? data.messages : []) { try { messages.push(parseMessage(raw, key, store.selfId)); } catch {} }
     await store.load(key);
-    if (store !== this.store || epoch !== this.epoch || this.historyVersions.get(key) !== version) return;
-    if (reconnect && lastTime > 0) {
-      for (const message of [...messages].sort((a, b) => a.time - b.time)) if (message.time >= lastTime) {
-        if (store.add(message, true) && message.senderId !== store.selfId) {
-          const reply = await this.resolveReply(store, message).catch(() => false);
-          if (store !== this.store || epoch !== this.epoch) return;
-          if (reply) store.markReplyToSelf(key);
-        }
+    if (store !== this.store || epoch !== this.epoch) return;
+    const unreadReplies = new Set<string>();
+    if (options.reconnect && options.since > 0) {
+      for (const message of [...messages].sort((a, b) => a.time - b.time)) if (message.time >= options.since) {
+        if (store.add(message, true) && message.senderId !== store.selfId && message.replyId) unreadReplies.add(message.id);
       }
     }
     store.history(key, messages);
@@ -413,7 +451,10 @@ export class QQApp implements vscode.Disposable {
     void (async () => {
       for (let i = 0; i < messages.length; i += 4) {
         if (store !== this.store || epoch !== this.epoch) return;
-        await Promise.allSettled(messages.slice(i, i + 4).filter(m => m.replyId).map(m => this.resolveReply(store, m)));
+        await Promise.allSettled(messages.slice(i, i + 4).filter(m => m.replyId).map(async m => {
+          const reply = await this.resolveReply(store, m);
+          if (reply && unreadReplies.has(m.id) && store === this.store && epoch === this.epoch) store.markReplyToSelf(key);
+        }));
       }
     })();
   }
@@ -421,18 +462,18 @@ export class QQApp implements vscode.Disposable {
     const store = this.store, epoch = this.epoch;
     if (!store || !key.startsWith('group:') || !this.client.connected) return;
     const lookup = `${epoch}:${key}`;
-    const pending = this.memberLoading.get(lookup); if (pending) return pending;
-    if (store.members.has(key) && Date.now() - (this.memberLoaded.get(key) ?? 0) < 300000) return;
+    const pending = this.session.memberLoading.get(lookup); if (pending) return pending;
+    if (store.members.has(key) && Date.now() - (this.session.memberLoaded.get(key) ?? 0) < 300000) return;
     const task = (async () => {
       try {
         const members = await this.client.call('get_group_member_list', { group_id: splitKey(key).id }, 10000);
         if (store === this.store && epoch === this.epoch && Array.isArray(members)) {
-          store.setMembers(key, members); this.memberLoaded.set(key, Date.now());
+          store.setMembers(key, members); this.session.memberLoaded.set(key, Date.now());
         }
       } catch { /* Keep cached members; the next completion retries. */ }
     })();
-    this.memberLoading.set(lookup, task);
-    try { await task; } finally { if (this.memberLoading.get(lookup) === task) this.memberLoading.delete(lookup); }
+    this.session.memberLoading.set(lookup, task);
+    try { await task; } finally { if (this.session.memberLoading.get(lookup) === task) this.session.memberLoading.delete(lookup); }
   }
   private async mentionMember(sender = false): Promise<void> {
     const editor = vscode.window.activeTextEditor, store = this.store;
@@ -471,233 +512,57 @@ export class QQApp implements vscode.Disposable {
     await this.native.focus(active);
   }
   async sendMessage(key: string, text: string, replyId?: string): Promise<boolean> {
+    const submission = await this.submitDraft(key, text, replyId);
+    return submission ? submission.completion : false;
+  }
+  async submitDraft(key: string, text: string, replyId?: string): Promise<Submission | undefined> {
     const store = this.store;
     if (!store || !store.chats.has(key)) throw new Error('发送对象无效');
     const openDoc = vscode.workspace.textDocuments.find(doc => !doc.isClosed && this.transcript?.key(doc.uri) === key);
     if (openDoc && this.native.isImporting(openDoc)) throw new Error('文件仍在导入，请在占位符出现后发送');
     if (openDoc && !this.native.region(openDoc)) throw new Error('草稿分隔线被修改，发送已暂停。请先重建聊天文档');
-    if (!text.trim() && !store.draft(key).attachments.some(a => !a.placeholder)) return false;
+    if (!text.trim() && !store.draft(key).attachments.some(a => !a.placeholder)) return;
     if (text.length > 65536) throw new Error('消息过长，请拆分后发送');
     if (!this.ready) throw new Error('NapCat 未连接，草稿已保留');
     const pendingKey = `${store.selfId}:${key}`;
-    if (this.submitting.has(pendingKey)) return false;
+    if (this.submitting.has(pendingKey)) return;
     if (replyId && (!/^-?\d+$/.test(replyId) || replyId === '0')) throw new Error('这条消息暂时无法引用');
-    const draft = store.draft(key);
-    const captured = draft.text === text && draft.replyId === replyId ? draft : store.setDraft(key, text, replyId);
-    const drafts = outgoingDrafts(captured);
     this.submitting.add(pendingKey);
-    const tasks: Promise<boolean>[] = [];
-    for (const outgoing of drafts) {
-      const parts = draftParts(outgoing.text, outgoing.attachments);
-      const local: Message = {
-        id: `local:${randomUUID()}`, chatKey: key, senderId: store.selfId, senderName: '我',
-        time: Math.floor(Date.now() / 1000), mentioned: false, replyId: outgoing.replyId,
-        sendState: this.sendQueues.has(pendingKey) ? 'queued' : 'sending', outgoing,
-        localImages: parts.filter((p): p is Attachment => typeof p !== 'string' && p.kind === 'image'),
-        segments: parts.map(p => typeof p === 'string' ? { type: 'text' as const, text: p } : p.kind === 'image' ? { type: 'image' as const, image: { file: '' } } : { type: 'text' as const, text: p.kind === 'file' ? p.placeholder ?? `[文件:${p.label}]` : `[表情:${p.faceId}]` })
-      };
-      store.add(local, false);
-      tasks.push(this.queueOutgoing(store, local));
-    }
-    store.completeSend(key, captured);
-    try { await this.syncOutgoing(store, key, true); }
-    finally { this.submitting.delete(pendingKey); }
-    return (await Promise.all(tasks)).every(Boolean);
+    try {
+      const submission = this.outbox.submit(store, key, text, replyId);
+      await this.syncOutgoing(store, key, true);
+      return submission;
+    } finally { this.submitting.delete(pendingKey); }
   }
   private async syncOutgoing(store: ChatStore, key: string, follow = false): Promise<void> {
     if (store !== this.store) return;
-    this.composer.update();
+    this.emojis.update();
     for (const editor of vscode.window.visibleTextEditors.filter(e => this.transcript?.key(e.document.uri) === key)) {
-      if (follow) this.following.set(editor, true);
+      if (follow) this.editor.follow(editor, true);
       await this.native.sync(editor, true);
-      if (follow) this.latest(editor);
+      if (follow) this.editor.latest(editor);
     }
-  }
-  private queueOutgoing(store: ChatStore, message: Message): Promise<boolean> {
-    const queueKey = `${store.selfId}:${message.chatKey}`;
-    const previous = this.sendQueues.get(queueKey) ?? Promise.resolve(true);
-    const files = this.attachments, epoch = this.epoch;
-    const task = previous.catch(() => false).then(async () => {
-      let requested = false;
-      const checkCancelled = () => { if (this.cancelled.has(message.id)) throw new Error('已取消发送'); };
-      try {
-        checkCancelled();
-        if (store !== this.store || epoch !== this.epoch || !this.ready) throw new Error('连接已变化，消息尚未提交');
-        message.sendState = 'sending'; message.sendError = undefined; message.sendProgress = undefined; store.enrichMessage(message);
-        await store.flush();
-        const draft = message.outgoing!;
-        const parts = draftParts(draft.text, draft.attachments);
-        const used = parts.filter((p): p is Attachment => typeof p !== 'string');
-        const file = used.find(a => a.kind === 'file');
-        if (file && files) {
-          const source = await files.filePath(file);
-          const check = () => { checkCancelled(); if (store !== this.store || epoch !== this.epoch || !this.ready) throw new Error('连接已变化，上传已暂停'); };
-          let lastUpdate = 0;
-          const remote = await uploadToNapCat(this.client, source, progress => {
-            check(); message.sendProgress = progress;
-            if (Date.now() - lastUpdate > 200 || progress.stage === 'confirm') { lastUpdate = Date.now(); store.enrichMessage(message); }
-          }, check);
-          check();
-          const chat = splitKey(message.chatKey);
-          requested = true;
-          const result = await this.client.call(chat.type === 'group' ? 'upload_group_file' : 'upload_private_file', {
-            [chat.type === 'group' ? 'group_id' : 'user_id']: chat.id, file: remote, name: file.label
-          }, 30 * 60 * 1000);
-          message.sendProgress = undefined;
-          message.fileIds = result?.file_id ? [String(result.file_id)] : undefined;
-          store.settleOutgoing(message.chatKey, message.id, { ...message, id: id(result?.message_id) || message.id });
-          await store.flush();
-          await this.syncOutgoing(store, message.chatKey).catch(error => this.log(error));
-          return true;
-        }
-        checkCancelled();
-        const media = files ? await files.segments(used) : [];
-        if (store !== this.store || epoch !== this.epoch || !this.ready) throw new Error('连接已变化，消息尚未提交');
-        checkCancelled();
-        const segments: unknown[] = draft.replyId ? [{ type: 'reply', data: { id: draft.replyId } }] : [];
-        let index = 0;
-        for (const part of parts) {
-          if (typeof part !== 'string') { segments.push(media[index++]); continue; }
-          let start = 0;
-          if (message.chatKey.startsWith('group:')) for (const match of part.matchAll(/@\[(\d+)\]/g)) {
-            if (match.index! > start) segments.push({ type: 'text', data: { text: part.slice(start, match.index) } });
-            segments.push({ type: 'at', data: { qq: match[1] } }); start = match.index! + match[0].length;
-          }
-          if (start < part.length) segments.push({ type: 'text', data: { text: part.slice(start) } });
-        }
-        const chat = splitKey(message.chatKey);
-        requested = true;
-        const result = await this.client.call('send_msg', { message_type: chat.type, [chat.type === 'group' ? 'group_id' : 'user_id']: chat.id, message: segments });
-        const confirmed = store.settleOutgoing(message.chatKey, message.id, { ...message, id: id(result?.message_id) || message.id });
-        if (message.localImages?.length && result?.message_id && store === this.store && epoch === this.epoch) {
-          void this.client.call('get_msg', { message_id: result.message_id }).then(raw => {
-            if (store === this.store && raw?.message && id(raw.message_id) === confirmed.id) store.enrichMessage(parseMessage(raw, message.chatKey, store.selfId));
-          }).catch(error => this.log(`图片详情稍后获取：${error.message}`));
-        }
-        await this.syncOutgoing(store, message.chatKey).catch(error => this.log(error));
-        return true;
-      } catch (error: any) {
-        if (this.cancelled.has(message.id) && !requested) {
-          message.sendState = 'cancelled'; message.outgoing = undefined; message.sendProgress = undefined; message.sendError = undefined; message.localImages = undefined;
-        } else {
-          message.sendState = requested && !String(error.message).includes('请求失败') ? 'uncertain' : 'failed';
-          message.sendError = error.message;
-        }
-        store.enrichMessage(message);
-        await this.syncOutgoing(store, message.chatKey).catch(error => this.log(error));
-        return false;
-      } finally { this.cancelled.delete(message.id); }
-    });
-    this.sendQueues.set(queueKey, task);
-    void task.finally(() => { if (this.sendQueues.get(queueKey) === task) this.sendQueues.delete(queueKey); });
-    return task;
-  }
-  private atBottom(editor: vscode.TextEditor): boolean {
-    return editor.visibleRanges.some(range => range.end.line >= editor.document.lineCount - 3);
   }
   private isReading(key: string): boolean {
     if (!vscode.window.state.focused) return false;
     return vscode.window.visibleTextEditors.some(editor => this.transcript?.key(editor.document.uri) === key
-      && (editor === vscode.window.activeTextEditor || (this.composer.focused && this.target === key))
-      && (this.following.get(editor) ?? this.atBottom(editor)));
+      && (editor === vscode.window.activeTextEditor || (this.emojis.focused && this.target === key))
+      && this.editor.isFollowing(editor));
   }
   checkRead(): void { if (this.target && this.isReading(this.target)) this.store?.markRead(this.target); }
-  private latest(editor = vscode.window.activeTextEditor, markRead = true): void {
-    const key = editor && this.transcript?.key(editor.document.uri);
-    if (!editor || !key) return;
-    this.following.set(editor, true);
-    this.pendingMessages.delete(key);
-    const last = editor.document.lineAt(editor.document.lineCount - 1).range.end;
-    editor.revealRange(new vscode.Range(last, last), vscode.TextEditorRevealType.Default);
-    if (markRead) this.checkRead(); this.updateNewMessages();
-  }
-  private updateNewMessages(): void {
-    const editor = vscode.window.activeTextEditor, key = editor && this.transcript?.key(editor.document.uri);
-    const count = key ? this.pendingMessages.get(key) ?? 0 : 0;
-    if (!key || !editor || this.following.get(editor) !== false) { this.newMessagesStatus.hide(); return; }
-    this.newMessagesStatus.text = count ? `$(arrow-down) 新消息 · ${count} 条` : '$(arrow-down) 返回最新';
-    this.newMessagesStatus.tooltip = '点击回到底部并恢复自动跟随'; this.newMessagesStatus.show();
-  }
-  private refreshHighlights(): void {
-    const cfg = vscode.workspace.getConfiguration('qq');
-    const color = (key: string, fallback: string) => { const value = cfg.get(key, fallback); return /^#[0-9a-f]{6}$/i.test(value) ? value : fallback; };
-    this.mentionDecoration?.dispose(); this.replyDecoration?.dispose();
-    const make = (value: string) => vscode.window.createTextEditorDecorationType({ isWholeLine: true, backgroundColor: value + '22', borderColor: value, borderStyle: 'solid', borderWidth: '0 0 0 2px', overviewRulerColor: value, overviewRulerLane: vscode.OverviewRulerLane.Right });
-    this.mentionDecoration = make(color('mentionColor', '#E5A030'));
-    this.replyDecoration = make(color('replyColor', '#409CFF'));
-  }
-  private decorate(editor: vscode.TextEditor): void {
-    const key = this.transcript?.key(editor.document.uri);
-    if (!key || !this.transcript) return;
-    const reliable = this.native.historyMatches(editor.document);
-    editor.setDecorations(this.mentionDecoration, reliable ? (this.transcript.rendered.get(key)?.mentionLines ?? []).map(line => new vscode.Range(line, 0, line, 0)) : []);
-    editor.setDecorations(this.replyDecoration, reliable ? (this.transcript.rendered.get(key)?.replyLines ?? []).map(line => new vscode.Range(line, 0, line, 0)) : []);
-    editor.setDecorations(this.ownDecoration, reliable ? (this.transcript.rendered.get(key)?.ownLines ?? []).map(line => new vscode.Range(line, 0, line, 0)) : []);
-    editor.setDecorations(this.imageDecoration, [
-      ...(this.native.historyMatches(editor.document) ? this.transcript.imageRanges(editor.document.uri) : []),
-      ...this.native.links(editor.document).map(link => link.range)
-    ]);
-  }
-  beforeHistoryChange(uri: vscode.Uri): void {
-    const key = this.transcript?.key(uri); if (!key) return;
-    const rendered = this.transcript?.rendered.get(key);
-    const anchor = (doc: vscode.TextDocument, p: vscode.Position): Anchor => {
-      const region = this.native.region(doc), offset = doc.offsetAt(p);
-      if (region && offset >= region.start) return { offset: 0, character: 0, draftOffset: offset - region.start };
-      const messageId = rendered?.messages.get(p.line);
-      return { messageId, offset: p.line - (messageId ? rendered?.starts.get(messageId) ?? 0 : 0), character: p.character };
-    };
-    this.snapshots.set(uri.toString(), vscode.window.visibleTextEditors.filter(editor => editor.document.uri.toString() === uri.toString()).map(editor => ({
-      editor, follow: this.following.get(editor) ?? this.atBottom(editor),
-      top: anchor(editor.document, editor.visibleRanges[0]?.start ?? new vscode.Position(0, 0)),
-      selections: editor.selections.map(s => ({ anchor: anchor(editor.document, s.anchor), active: anchor(editor.document, s.active) }))
-    })));
-  }
-  afterHistoryChange(doc: vscode.TextDocument, applied: boolean): void {
-    const uri = doc.uri.toString();
-    if (!applied) { this.snapshots.delete(uri); return; }
-    const key = this.transcript?.key(doc.uri); if (!key) return;
-    const rendered = this.transcript?.rendered.get(key);
-    const position = (a: Anchor): vscode.Position => {
-      const region = this.native.region(doc);
-      if (a.draftOffset !== undefined && region) return doc.positionAt(region.start + Math.min(a.draftOffset, region.text.length));
-      const line = Math.max(0, Math.min(doc.lineCount - 1, (a.messageId ? rendered?.starts.get(a.messageId) ?? 0 : 0) + a.offset));
-      return new vscode.Position(line, Math.min(a.character, doc.lineAt(line).text.length));
-    };
-    for (const snapshot of this.snapshots.get(doc.uri.toString()) ?? []) {
-      const editor = snapshot.editor;
-      if (!vscode.window.visibleTextEditors.includes(editor)) continue;
-      editor.selections = snapshot.selections.map(s => new vscode.Selection(position(s.anchor), position(s.active)));
-      if (snapshot.follow) this.latest(editor, false);
-      else {
-        const top = position(snapshot.top);
-        if (editor.visibleRanges[0]?.start.line !== top.line) editor.revealRange(new vscode.Range(top, top), vscode.TextEditorRevealType.AtTop);
-      }
-      this.following.set(editor, snapshot.follow);
-    }
-    this.snapshots.delete(doc.uri.toString());
-    clearTimeout(this.scrollGuards.get(uri));
-    this.scrollGuards.set(uri, setTimeout(() => { this.scrollGuards.delete(uri); }, 80));
-    this.updateNewMessages();
-    this.documentChanged(doc);
-  }
-  private documentChanged(doc: vscode.TextDocument): void {
-    for (const editor of vscode.window.visibleTextEditors) if (editor.document === doc) this.decorate(editor);
-  }
   private commands(): void {
     const register = (command: string, action: (...args: any[]) => unknown) => {
       this.disposables.push(vscode.commands.registerCommand(command, async (...args: any[]) => {
         try { return await action(...args); } catch (error: any) { this.log(error); void vscode.window.showErrorMessage(error.message); throw error; }
       }));
     };
-    const currentKey = (item?: Chat | string): string | undefined => typeof item === 'string' ? item : item?.key ?? this.target;
+    const currentKey = (item?: (Chat & { account?: string }) | string): string | undefined => typeof item === 'string' ? item : item?.account && item.account !== this.store?.selfId ? undefined : item?.key ?? this.target;
     register('qq.connect', () => this.connect());
     register('qq.disconnect', () => this.client.disconnect());
     register('qq.configure', () => this.settings.open());
     register('qq.chooseCodeLanguage', async () => {
-      const labels = ['C', 'Python', 'JavaScript', 'TypeScript', 'Dart', 'Kotlin', 'Java', 'Swift'];
-      const selected = await vscode.window.showQuickPick(codeLanguages.map((value, i) => ({
-        label: labels[i], description: value === this.config.codeLanguage ? '当前风格' : '', value
+      const selected = await vscode.window.showQuickPick(codeLanguages.map(value => ({
+        label: languageLabels[value], description: value === this.config.codeLanguage ? '当前风格' : '', value
       })), { title: 'QQ 代码风格', placeHolder: '选择后立即应用，保留当前草稿' });
       if (selected) await vscode.workspace.getConfiguration('qq').update('codeLanguage', selected.value, vscode.ConfigurationTarget.Global);
     });
@@ -721,12 +586,16 @@ export class QQApp implements vscode.Disposable {
     register('qq.focusInput', () => this.focusInput());
     register('qq.send', async () => {
       const editor = vscode.window.activeTextEditor, key = editor && this.transcript?.key(editor.document.uri);
-      if (editor && key) await this.sendMessage(key, this.native.draft(editor.document), this.store?.draft(key).replyId);
+      if (editor && key) await this.submitDraft(key, this.native.draft(editor.document), this.store?.draft(key).replyId);
     });
     register('qq.newline', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || !this.native.inDraft(editor)) return;
-      await editor.edit(edit => { for (const selection of editor.selections) edit.replace(selection, '\n'); });
+      const applied = await editor.edit(edit => { for (const selection of editor.selections) edit.replace(selection, '\n'); });
+      if (applied) {
+        if (editor.selection.active.line === editor.document.lineCount - 1) this.editor.latest(editor);
+        else editor.revealRange(new vscode.Range(editor.selection.active, editor.selection.active));
+      }
     });
     register('qq.retryMessage', async (uri: string, messageId: string) => {
       if (typeof uri !== 'string' || typeof messageId !== 'string') return;
@@ -738,15 +607,12 @@ export class QQApp implements vscode.Disposable {
       if (state === 'uncertain' && await vscode.window.showWarningMessage('这条消息的结果未确认，可能已经送达。检查聊天记录后仍要重试吗？', { modal: true }, '仍然重试') !== '仍然重试') return;
       if (store !== this.store || message.sendState !== state) return;
       message.sendState = 'queued'; message.sendError = undefined; store.enrichMessage(message);
-      return this.queueOutgoing(store, message);
+      return this.outbox.enqueue(store, message);
     });
     register('qq.cancelMessage', async (uri: string, messageId: string) => {
       const key = this.transcript?.key(vscode.Uri.parse(uri));
       const message = key && this.store?.messages.get(key)?.find(m => m.id === messageId);
-      if (!message || !(message.sendState === 'queued' || (message.sendState === 'sending' && message.sendProgress?.stage === 'upload'))) return;
-      this.cancelled.add(message.id); message.sendState = 'cancelled'; message.sendProgress = undefined;
-      message.outgoing = undefined; message.localImages = undefined; message.sendError = undefined;
-      this.store!.enrichMessage(message); await this.store!.flush();
+      if (message && this.store) await this.outbox.cancel(this.store, message);
     });
     register('qq.insertFile', async () => {
       const store = this.store, files = this.attachments, key = this.target; if (!store || !files || !key) return;
@@ -763,10 +629,10 @@ export class QQApp implements vscode.Disposable {
       const editor = vscode.window.activeTextEditor;
       if (editor && this.transcript?.key(editor.document.uri)) { await this.native.sync(editor, true, true); await this.native.focus(editor); }
     });
-    register('qq.insertImage', () => this.composer.handleMessage({ type: 'pickImages', account: this.store?.selfId, key: this.target }));
+    register('qq.insertImage', () => this.target ? this.imports.selectImages(this.target) : undefined);
     register('qq.mentionMember', () => this.mentionMember());
     register('qq.mentionSender', () => this.mentionMember(true));
-    register('qq.emojis', () => this.composer.showEmojis());
+    register('qq.emojis', () => this.emojis.showEmojis());
     register('qq.cancelReply', async () => {
       const editor = vscode.window.activeTextEditor;
       const key = editor && this.transcript?.key(editor.document.uri) || this.target;
@@ -774,7 +640,7 @@ export class QQApp implements vscode.Disposable {
       this.store.setDraft(key, this.store.draft(key).text);
       if (editor && this.transcript?.key(editor.document.uri) === key) await this.native.sync(editor);
     });
-    register('qq.latest', () => this.latest());
+    register('qq.latest', () => this.editor.latest());
     register('qq.loadHistory', () => { if (this.target) return this.loadHistory(this.target, true); });
     register('qq.search', async () => {
       const chats = [...this.store?.chats.values() ?? []];
@@ -801,8 +667,8 @@ export class QQApp implements vscode.Disposable {
       const store = this.store, key = this.transcript?.key(vscode.Uri.parse(uri));
       if (!store || !key || !Number.isInteger(fileIndex) || fileIndex < 0) return;
       const message = store.messages.get(key)?.find(m => m.id === messageId);
-      const part = message?.segments.filter(s => s.type === 'text' && s.file)[fileIndex];
-      if (!part || part.type !== 'text' || !part.file) throw new Error('文件消息不在当前记录中');
+      const part = message?.segments.filter(s => s.type === 'file')[fileIndex];
+      if (!part || part.type !== 'file') throw new Error('文件消息不在当前记录中');
       const ref = part.file;
       const safeName = ref.name.split(/[\\/]/).pop()?.replace(/[<>:"|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '') || 'QQ文件';
       const destination = await vscode.window.showSaveDialog({ title: '保存 QQ 文件', defaultUri: vscode.Uri.file(path.join(os.homedir(), 'Downloads', safeName)) });
@@ -879,7 +745,7 @@ export class QQApp implements vscode.Disposable {
         await this.native.insert(key, [attachment]);
         if (store === this.store && vscode.window.activeTextEditor === active) {
           if (!this.native.inDraft(active)) await this.native.focus(active);
-          this.latest(active, false);
+          this.editor.latest(active, false);
         }
       } else store.attach(key, [attachment]);
     } finally {
@@ -894,41 +760,26 @@ export class QQApp implements vscode.Disposable {
     const doc = await vscode.workspace.openTextDocument(this.transcript.uri(chat));
     const editor = await vscode.window.showTextDocument(doc, { preview: false });
     await this.native.focus(editor);
-    this.latest(editor);
+    this.editor.latest(editor);
   }
-  filterList(section: Section, query: string): void {
+  filterList(section: Section, query: string, fromCommand = true): void {
     this.trees.find(t => t.section === section)?.setFilter(query);
+    if (fromCommand) this.listViews.get(section)?.setFilter(query);
     void vscode.commands.executeCommand('setContext', `qq.${section}.filtered`, !!query.trim());
   }
-  private searchList(section: Section): void {
-    this.filterInput?.hide();
-    const tree = this.trees.find(t => t.section === section)!;
-    const old = tree.filter;
-    const input = vscode.window.createInputBox(); this.filterInput = input;
-    input.title = `搜索${section === 'favorites' ? '收藏' : '列表'}`;
-    input.placeholder = '名称或 QQ / 群号；空格分隔多个关键词';
-    input.prompt = '输入时筛选列表 · Enter 保留筛选 · Esc 取消 · 列表标题 × 清除';
-    input.value = old;
-    let accepted = false;
-    const changed = input.onDidChangeValue(value => this.filterList(section, value));
-    const accept = input.onDidAccept(() => { accepted = true; input.hide(); });
-    const hide = input.onDidHide(() => {
-      if (!accepted) this.filterList(section, old);
-      changed.dispose(); accept.dispose(); hide.dispose(); input.dispose();
-      if (this.filterInput === input) this.filterInput = undefined;
-    });
-    input.show();
+  private async searchList(section: Section): Promise<void> {
+    await vscode.commands.executeCommand(`qq.${section}.focus`);
+    this.listViews.get(section)?.focusSearch();
   }
   private updateStatus(text: string): void {
     this.settingsTree.status = text; this.settingsTree.refresh();
     this.status.text = `$(${this.ready ? 'comment-discussion' : 'debug-disconnect'}) QQ · ${text}`;
-    this.status.tooltip = 'NapCat / OneBot v11 · 点击重新连接'; this.composer.update();
+    this.status.tooltip = 'NapCat / OneBot v11 · 点击重新连接'; this.emojis.update();
   }
-  private log(error: unknown): void { this.output.appendLine(error instanceof Error ? error.message : 'QQ 操作失败'); }
+  private log(error: unknown): void { this.output.appendLine(`[${new Date().toISOString()}] ${error instanceof Error ? error.message : String(error)}`); }
   async shutdown(): Promise<void> {
     if (this.stopped) return;
-    this.stopped = true; clearTimeout(this.initializationRetry); clearInterval(this.cacheTimer); this.mentionDecoration.dispose(); this.replyDecoration.dispose(); clearInterval(this.notificationTimer); this.notifications?.dispose(); this.filterInput?.hide();
-    for (const timer of this.scrollGuards.values()) clearTimeout(timer);
+    this.stopped = true; this.session.advance(); clearTimeout(this.initializationRetry); clearInterval(this.cacheTimer); clearInterval(this.notificationTimer); this.notifications?.dispose(); this.historyQueue.clear();
     this.client.dispose(); await this.store?.dispose(); this.transcript?.dispose();
     this.disposables.forEach(d => d.dispose());
   }
