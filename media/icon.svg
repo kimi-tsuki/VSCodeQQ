@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Native Chat: message bubble with code brackets</title>
+  <rect width="256" height="256" rx="52" fill="#111827"/>
+  <path d="M169 93h25a22 22 0 0 1 22 22v63a22 22 0 0 1-22 22h-18v22l-32-22h-31a22 22 0 0 1-22-22v-12" fill="#183147" stroke="#48708d" stroke-width="9" stroke-linejoin="round"/>
+  <path d="M61 49h109a22 22 0 0 1 22 22v70a22 22 0 0 1-22 22h-65l-42 30v-30h-2a22 22 0 0 1-22-22V71a22 22 0 0 1 22-22Z" fill="#16394d" stroke="#74c0fc" stroke-width="10" stroke-linejoin="round"/>
+  <path d="m92 86-21 20 21 20m47-40 21 20-21 20" fill="none" stroke="#cbf078" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

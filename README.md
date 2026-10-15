@@ -1,6 +1,6 @@
 # NapCat QQ for VS Code
 
-在 VS Code 原生编辑器里聊 QQ。基于 **NapCat / OneBot v11**，聊天记录默认以 C 风格代码显示，底部直接写草稿，沿用编辑器的字体、主题、行号、查找与分屏。
+在 VS Code 原生编辑器里聊 QQ。由 **LimeLisest** 维护的独立第三方客户端。基于 **NapCat / OneBot v11**，聊天记录默认以 C 风格代码显示，底部直接写草稿，沿用编辑器的字体、主题、行号、查找与分屏。
 
 - **原生聊天**：在编辑器底部写草稿，Enter 发送，Shift / Ctrl+Enter 换行；文字、图片和文件按占位符顺序发送。
 - **会话与提醒**：统一列表、收藏置顶、内置搜索和收纳箱；@我、回复我、撤回消息分别高亮。
@@ -10,6 +10,8 @@
 - **本地恢复**：独立草稿、未完成发送保存、重连补历史和附件缓存管理。
 
 [快速开始](#快速开始) · [界面预览](#界面预览) · [安装与连接](#安装与连接) · [使用教程](#使用教程) · [配置说明](#配置说明) · [常见问题](#常见问题) · [开发与依赖](#开发与依赖)
+
+扩展标识：`LimeLisest.limelisest-napcat-qq`。本项目自制“消息气泡 + 代码符号”图标，不使用 QQ 企鹅或官方品牌图标。更新记录见 [CHANGELOG](CHANGELOG.md)，问题反馈见 [SUPPORT](SUPPORT.md)，上架步骤见 [Marketplace 发布说明](docs/publishing.md)。
 
 ## 快速开始
 
@@ -64,10 +66,12 @@
 
 在 VS Code 中打开扩展视图（`Ctrl+Shift+X`），点击右上角 `…` → **从 VSIX 安装… / Install from VSIX…**，选择安装包。更新已有版本后，执行 **Developer: Reload Window / 开发人员: 重新加载窗口**。
 
+早期本地安装包使用 `rynxis.vscode-qq`，当前发布者为 `LimeLisest`，内部名称为 `limelisest-napcat-qq`。VS Code 会将两者视为不同扩展；安装新版后请停用旧版，避免重复连接。原扩展的安全存储与聊天缓存不会自动迁移，需在新版重新配置连接。
+
 也可以在能使用 `code` 命令的终端里安装：
 
 ```sh
-code --install-extension ./artifacts/vscode-qq-0.2.8.vsix --force
+code --install-extension ./artifacts/limelisest-napcat-qq-0.2.8.vsix --force
 ```
 
 没有安装包时，安装 Node.js 22 或更高版本及 Git，在终端执行：
@@ -402,6 +406,12 @@ node dist/test/live.cjs "path/to/tuiqq/config.json"
 ```
 
 脚本不发送消息，结果写入 `.test-output/live-result.json`。请勿将包含 Token 的本地配置提交到仓库。
+
+## 图标与项目身份
+
+商店图标为本项目绘制的消息气泡与代码符号，提供 256×256 PNG；侧栏和聊天标签使用同一图形的 SVG 版本。图标源文件见 [media/icon.svg](media/icon.svg)。
+
+本项目是独立的 NapCat / OneBot QQ 客户端。QQ、NapCat 等名称用于说明连接对象和兼容范围，不代表官方出品或合作关系。
 
 ## 许可证
 

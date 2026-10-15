@@ -4,11 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const preview = process.argv.includes('--preview');
+const { publisher, name } = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const extensionId = `${publisher}.${name}`.toLowerCase();
 const profile = path.join(root, '.test-profile');
 const extensions = path.join(root, '.test-extensions');
 fs.mkdirSync(path.join(profile, 'User'), { recursive: true });
 fs.mkdirSync(extensions, { recursive: true });
-fs.rmSync(path.join(profile, 'User', 'globalStorage', 'rynxis.vscode-qq'), { recursive: true, force: true });
+fs.rmSync(path.join(profile, 'User', 'globalStorage', extensionId), { recursive: true, force: true });
 fs.writeFileSync(path.join(profile, 'User', 'settings.json'), JSON.stringify({
   'qq.autoConnect': false, 'workbench.startupEditor': 'none',
   'security.workspace.trust.enabled': false, 'telemetry.telemetryLevel': 'off',

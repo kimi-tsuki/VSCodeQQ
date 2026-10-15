@@ -25,7 +25,8 @@ export async function run(): Promise<void> {
     // Use VS Code's textarea input path in the isolated automation profile.
     await vscode.workspace.getConfiguration('editor').update('editContext', false, vscode.ConfigurationTarget.Global);
     await vscode.workspace.getConfiguration('qq').update('wsUrl', backend.url, vscode.ConfigurationTarget.Global);
-    const extension = vscode.extensions.getExtension<{ app: QQApp }>('rynxis.vscode-qq');
+    const identityManifest = JSON.parse(await fs.readFile(path.join(__dirname, '..', '..', 'package.json'), 'utf8'));
+    const extension = vscode.extensions.getExtension<{ app: QQApp }>(`${identityManifest.publisher}.${identityManifest.name}`);
     assert.ok(extension, '插件未加载');
     app = (await extension.activate()).app;
     const form = { url: backend.url, token: 'isolated-test-token', autoConnect: false, clearToken: false };
