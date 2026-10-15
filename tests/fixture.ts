@@ -134,7 +134,7 @@ export class MockNapCat {
     ]);
   }
 }
-export async function until(check: () => boolean, timeout = 8000): Promise<void> {
+export async function until(check: () => boolean | Promise<boolean>, timeout = 8000): Promise<void> {
   const end = Date.now() + timeout;
-  while (!check()) { if (Date.now() > end) throw new Error('等待条件超时'); await new Promise(resolve => setTimeout(resolve, 30)); }
+  while (!await check()) { if (Date.now() > end) throw new Error('等待条件超时'); await new Promise(resolve => setTimeout(resolve, 30)); }
 }

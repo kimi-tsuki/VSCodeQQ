@@ -33,6 +33,8 @@ export class QQApp implements vscode.Disposable {
   readonly editor: ChatEditorController;
   get native() { return this.editor.native; }
   readonly trees: ChatTree[] = [];
+  private historyClickTimer?: NodeJS.Timeout;
+  private lastMentionClick?: { uri: string; qq: string; time: number };
   private listViews = new Map<Section, ChatListView>();
   private historyQueue = new HistoryQueue();
   private historyLoaded = new Map<string, number>();
@@ -108,7 +110,7 @@ export class QQApp implements vscode.Disposable {
           const range = new vscode.Range(position.line, before.lastIndexOf('@'), position.line, position.character);
           return [...this.store?.members.get(key)?.values() ?? []].filter(m => `${m.name} ${m.nickname} ${m.id}`.toLowerCase().includes(at[1].toLowerCase())).map(m => {
             const item = new vscode.CompletionItem(m.name, vscode.CompletionItemKind.User);
-            item.filterText = `@${m.name} ${m.nickname ?? ''} ${m.id}`; item.detail = `${m.nickname ?? ''} · ${m.id}`; item.range = range; item.insertText = `@[${m.id}] `; return item;
+            item.filterText = `@${m.name} ${m.nickname ?? ''} ${m.id}`; item.detail = `${m.nickname ?? ''} · ${m.id}`; item.range = range; item.insertText = `${store!.reserveMention(key, m.id, m.name)} `; return item;
           });
         }
         const range = new vscode.Range(position.translate(0, -match[1].length), position);
@@ -136,9 +138,9 @@ export class QQApp implements vscode.Disposable {
         catch (error: any) { void vscode.window.showErrorMessage(`QQ 文件导入失败：${error.message}`); return new vscode.DocumentDropEdit('', '文件未导入', vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file')); }
       }
     }, { dropMimeTypes: ['text/uri-list', 'files'], providedDropEditKinds: [vscode.DocumentDropOrPasteEditKind.Empty.append('qq', 'file')] }));
-    for (const section of ['list', 'favorites'] as Section[]) {
+    for (const section of ['list'] as Section[]) {
       const provider = new ChatTree(section, () => this.store); this.trees.push(provider);
-      const view = new ChatListView(provider, () => this.store, query => this.filterList(section, query, false));
+      const view = new ChatListView(provider, () => this.store, query => this.filterList(section, query, false), this.context.extensionUri);
       this.listViews.set(section, view);
       this.disposables.push(provider, view, vscode.window.registerWebviewViewProvider(`qq.${section}`, view));
     }
@@ -156,6 +158,18 @@ export class QQApp implements vscode.Disposable {
     }), vscode.window.onDidChangeWindowState(() => this.checkRead()),
     vscode.window.onDidChangeTextEditorSelection(event => {
       this.native.updateContext();
+      clearTimeout(this.historyClickTimer);
+      if (event.kind === vscode.TextEditorSelectionChangeKind.Mouse && event.selections.length === 1 && event.selections[0].isEmpty && this.native.historyMatches(event.textEditor.document)) {
+        const editor = event.textEditor, position = event.selections[0].active, version = editor.document.version;
+        const command = this.transcript?.clickCommand(editor.document, position);
+        if (command) this.historyClickTimer = setTimeout(() => {
+          // A drag or double click produces a non-empty selection. Let it settle
+          // before moving focus to the draft so copying history still works.
+          if (this.stopped || vscode.window.activeTextEditor !== editor || editor.document.version !== version || !editor.selection.isEmpty || !editor.selection.active.isEqual(position) || !this.native.historyMatches(editor.document)) return;
+          const args = JSON.parse(decodeURIComponent(command.query));
+          void vscode.commands.executeCommand(command.path, ...args).then(undefined, error => this.log(error));
+        }, 250);
+      }
       if (event.kind === vscode.TextEditorSelectionChangeKind.Keyboard || event.kind === vscode.TextEditorSelectionChangeKind.Mouse) this.checkRead();
     }));
     this.disposables.push(vscode.window.tabGroups.onDidChangeTabs(event => {
@@ -479,12 +493,12 @@ export class QQApp implements vscode.Disposable {
     const editor = vscode.window.activeTextEditor, store = this.store;
     const key = editor && this.transcript?.key(editor.document.uri);
     if (!editor || !store || !key?.startsWith('group:')) throw new Error('请先打开群聊，再选择要 @ 的成员');
-    let memberId: string | undefined;
+    let memberId: string | undefined, memberName: string | undefined;
     if (sender) {
       if (!this.native.historyMatches(editor.document)) throw new Error('请等待聊天记录更新后重试');
       const message = this.transcript?.messageAt(editor.document.uri, editor.selection.active.line);
       if (!message || !/^\d+$/.test(message.senderId)) throw new Error('请将光标放在要 @ 的群成员消息上');
-      memberId = message.senderId;
+      memberId = message.senderId; memberName = store.displayMessages(key).find(m => m.id === message.id)?.senderName || message.senderName;
     } else {
       await this.loadMembers(key);
       if (store !== this.store) return;
@@ -493,10 +507,21 @@ export class QQApp implements vscode.Disposable {
       const selected = await vscode.window.showQuickPick(members.map(m => ({
         label: m.name, description: m.id, detail: m.nickname, memberId: m.id
       })), { title: '@ 群成员', placeHolder: '搜索群名片、昵称或 QQ 号', matchOnDescription: true, matchOnDetail: true });
-      memberId = selected?.memberId;
+      memberId = selected?.memberId; memberName = selected?.label;
     }
     if (!memberId || store !== this.store) return;
-    const text = `@[${memberId}] `;
+    await this.insertMention(editor.document.uri.toString(), memberId, memberName);
+  }
+  private async insertMention(uri: string, memberId: string, memberName?: string, fromLink = false): Promise<void> {
+    const store = this.store, parsed = vscode.Uri.parse(uri), key = this.transcript?.key(parsed);
+    if (!store || !key?.startsWith('group:') || !/^(?:\d+|all)$/.test(memberId)) return;
+    const last = this.lastMentionClick, now = Date.now();
+    if (fromLink && last?.uri === uri && last.qq === memberId && now - last.time < 300) return;
+    if (fromLink) this.lastMentionClick = { uri, qq: memberId, time: now };
+    const name = store.members.get(key)?.get(memberId)?.name || memberName || (memberId === 'all' ? '全体成员' : memberId);
+    const text = `${store.reserveMention(key, memberId, name)} `;
+    const editor = vscode.window.visibleTextEditors.find(e => e.document.uri.toString() === uri);
+    if (!editor) { const draft = store.draft(key); store.setDraft(key, draft.text + text, draft.replyId); return; }
     if (vscode.window.activeTextEditor?.document !== editor.document) {
       const draft = store.draft(key); store.setDraft(key, draft.text + text, draft.replyId); return;
     }
@@ -570,19 +595,18 @@ export class QQApp implements vscode.Disposable {
       const config = vscode.workspace.getConfiguration('qq');
       await config.update('autoConnect', !config.get('autoConnect', true), vscode.ConfigurationTarget.Global);
     });
-    for (const page of ['list', 'favorites'] as Section[]) register(`qq.show.${page}`, async () => {
+    for (const page of ['list'] as Section[]) register(`qq.show.${page}`, async () => {
       await vscode.commands.executeCommand(`qq.${page}.focus`);
     });
     register('qq.importConfig', async () => { if (await this.config.import()) await this.connect(); });
     register('qq.refresh', () => this.ready ? this.refresh() : this.connect());
     register('qq.openChat', (item: string | Chat) => this.openChat(item));
+    register('qq.toggleCollapsed', (item?: Chat | string) => { const key = currentKey(item); if (key) this.store?.toggleCollapsed(key); });
     register('qq.toggleFavorite', (item?: Chat | string) => { const key = currentKey(item); if (key) this.store?.toggleFavorite(key); });
     register('qq.markRead', (item?: Chat | string) => { const key = currentKey(item); if (key) this.store?.markRead(key); });
     register('qq.toggleIgnoreUnread', (item?: Chat | string) => { const key = currentKey(item); if (key) this.store?.toggleIgnoreUnread(key); });
-    for (const tree of this.trees) {
-      register(`qq.search.${tree.section}`, () => this.searchList(tree.section));
-      register(`qq.clearSearch.${tree.section}`, () => this.filterList(tree.section, ''));
-    }
+    register('qq.search.list', () => this.searchList('list'));
+    register('qq.clearSearch.list', () => this.filterList('list', ''));
     register('qq.focusInput', () => this.focusInput());
     register('qq.send', async () => {
       const editor = vscode.window.activeTextEditor, key = editor && this.transcript?.key(editor.document.uri);
@@ -632,6 +656,7 @@ export class QQApp implements vscode.Disposable {
     register('qq.insertImage', () => this.target ? this.imports.selectImages(this.target) : undefined);
     register('qq.mentionMember', () => this.mentionMember());
     register('qq.mentionSender', () => this.mentionMember(true));
+    register('qq.insertMention', (uri: string, qq: string, name?: string) => this.insertMention(uri, qq, name, true));
     register('qq.emojis', () => this.emojis.showEmojis());
     register('qq.cancelReply', async () => {
       const editor = vscode.window.activeTextEditor;
@@ -779,7 +804,7 @@ export class QQApp implements vscode.Disposable {
   private log(error: unknown): void { this.output.appendLine(`[${new Date().toISOString()}] ${error instanceof Error ? error.message : String(error)}`); }
   async shutdown(): Promise<void> {
     if (this.stopped) return;
-    this.stopped = true; this.session.advance(); clearTimeout(this.initializationRetry); clearInterval(this.cacheTimer); clearInterval(this.notificationTimer); this.notifications?.dispose(); this.historyQueue.clear();
+    this.stopped = true; clearTimeout(this.historyClickTimer); this.session.advance(); clearTimeout(this.initializationRetry); clearInterval(this.cacheTimer); clearInterval(this.notificationTimer); this.notifications?.dispose(); this.historyQueue.clear();
     this.client.dispose(); await this.store?.dispose(); this.transcript?.dispose();
     this.disposables.forEach(d => d.dispose());
   }

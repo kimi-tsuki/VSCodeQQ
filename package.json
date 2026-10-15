@@ -2,7 +2,7 @@
   "name": "vscode-qq",
   "displayName": "QQ · Native Chat",
   "description": "使用原生编辑器聊天的 NapCat / OneBot v11 QQ 客户端。",
-  "version": "0.2.1",
+  "version": "0.2.6",
   "publisher": "rynxis",
   "license": "MIT",
   "engines": {
@@ -51,11 +51,6 @@
           "type": "webview"
         },
         {
-          "id": "qq.favorites",
-          "name": "收藏",
-          "type": "webview"
-        },
-        {
           "id": "qq.settings",
           "name": "设置"
         }
@@ -72,10 +67,6 @@
       {
         "view": "qq.list",
         "contents": "暂无会话。\n[连接设置](command:qq.configure)\n[连接 NapCat](command:qq.connect)"
-      },
-      {
-        "view": "qq.favorites",
-        "contents": "右键会话添加收藏。\n[连接设置](command:qq.configure)"
       }
     ],
     "commands": [
@@ -151,17 +142,7 @@
       },
       {
         "command": "qq.toggleIgnoreUnread",
-        "title": "QQ: 忽略 / 恢复此会话未读"
-      },
-      {
-        "command": "qq.search.favorites",
-        "title": "QQ: 搜索收藏",
-        "icon": "$(search)"
-      },
-      {
-        "command": "qq.clearSearch.favorites",
-        "title": "QQ: 清除收藏搜索",
-        "icon": "$(close)"
+        "title": "QQ: 设为不提醒 / 恢复提醒"
       },
       {
         "command": "qq.send",
@@ -198,10 +179,6 @@
       {
         "command": "qq.show.list",
         "title": "列表"
-      },
-      {
-        "command": "qq.show.favorites",
-        "title": "收藏"
       },
       {
         "command": "qq.search.list",
@@ -242,35 +219,34 @@
         "command": "qq.toggleAutoConnect",
         "title": "QQ: 切换自动连接",
         "icon": "$(sync)"
+      },
+      {
+        "command": "qq.toggleCollapsed",
+        "title": "QQ: 放入 / 移出收纳箱"
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "qq.configure",
-          "when": "view == qq.list || view == qq.favorites",
+          "when": "view == qq.list",
           "group": "navigation@9"
         },
         {
           "command": "qq.refresh",
-          "when": "view == qq.list || view == qq.favorites"
+          "when": "view == qq.list"
         },
         {
           "command": "qq.importConfig",
-          "when": "view == qq.list || view == qq.favorites"
+          "when": "view == qq.list"
         },
         {
           "command": "qq.disconnect",
-          "when": "view == qq.list || view == qq.favorites"
+          "when": "view == qq.list"
         },
         {
           "command": "qq.search.list",
           "when": "view == qq.list",
-          "group": "navigation@3"
-        },
-        {
-          "command": "qq.search.favorites",
-          "when": "view == qq.favorites",
           "group": "navigation@3"
         }
       ],
@@ -360,10 +336,6 @@
       ],
       "commandPalette": [
         {
-          "command": "qq.clearSearch.favorites",
-          "when": "qq.favorites.filtered"
-        },
-        {
           "command": "qq.clearSearch.list",
           "when": "qq.list.filtered"
         }
@@ -371,18 +343,23 @@
       "webview/context": [
         {
           "command": "qq.toggleFavorite",
-          "when": "webviewSection == qq-chat-row && (webviewId == qq.list || webviewId == qq.favorites)",
+          "when": "webviewSection == qq-chat-row && webviewId == qq.list",
           "group": "qq@0"
         },
         {
           "command": "qq.markRead",
-          "when": "webviewSection == qq-chat-row && (webviewId == qq.list || webviewId == qq.favorites)",
+          "when": "webviewSection == qq-chat-row && webviewId == qq.list",
           "group": "qq@1"
         },
         {
           "command": "qq.toggleIgnoreUnread",
-          "when": "webviewSection == qq-chat-row && (webviewId == qq.list || webviewId == qq.favorites)",
+          "when": "webviewSection == qq-chat-row && webviewId == qq.list",
           "group": "qq@2"
+        },
+        {
+          "command": "qq.toggleCollapsed",
+          "when": "webviewSection == qq-chat-row && chatType == group",
+          "group": "qq@1"
         }
       ]
     },

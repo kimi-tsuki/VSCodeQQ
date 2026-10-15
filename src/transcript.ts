@@ -58,12 +58,28 @@ export class Transcript implements vscode.DocumentLinkProvider, vscode.HoverProv
       const link = new vscode.DocumentLink(new vscode.Range(span.line, span.start, span.line, span.end), target);
       link.tooltip = '下载文件 / 另存为'; links.push(link);
     }
+    for (const span of this.rendered.get(key)?.mentions ?? []) {
+      const link = new vscode.DocumentLink(new vscode.Range(span.line, span.start, span.line, span.end), this.mentionCommand(doc.uri, span.qq, span.name));
+      link.tooltip = '点击加入 @ 到草稿'; links.push(link);
+    }
     for (const action of this.rendered.get(key)?.actions ?? []) {
       const target = action.kind === 'reply' ? this.replyCommand(doc.uri, action.messageId) : action.kind === 'cancel' ? vscode.Uri.parse(`command:qq.cancelMessage?${encodeURIComponent(JSON.stringify([doc.uri.toString(), action.messageId]))}`) : this.retryCommand(doc.uri, action.messageId);
-      const link = new vscode.DocumentLink(new vscode.Range(action.line, action.start, action.line, action.start + 4), target);
-      link.tooltip = action.kind === 'reply' ? '回复这条消息' : action.kind === 'cancel' ? '取消尚未提交的消息' : '重新发送这条消息'; links.push(link);
+      const link = new vscode.DocumentLink(new vscode.Range(action.line, action.start, action.line, action.end), target);
+      link.tooltip = action.kind === 'reply' ? '点击回复这条消息' : action.kind === 'cancel' ? '取消尚未提交的消息' : '重新发送这条消息'; links.push(link);
     }
     return links;
+  }
+  private mentionCommand(uri: vscode.Uri, qq: string, name: string): vscode.Uri {
+    return vscode.Uri.parse(`command:qq.insertMention?${encodeURIComponent(JSON.stringify([uri.toString(), qq, name]))}`);
+  }
+  clickCommand(doc: vscode.TextDocument, pos: vscode.Position): vscode.Uri | undefined {
+    const key = this.key(doc.uri), content = key && this.rendered.get(key);
+    if (!content) return;
+    const contains = (span: { line: number; start: number; end: number }) => span.line === pos.line && span.start <= pos.character && pos.character < span.end;
+    const mention = content.mentions.find(contains);
+    if (mention) return this.mentionCommand(doc.uri, mention.qq, mention.name);
+    const reply = content.actions.find(a => a.kind === 'reply' && contains(a));
+    if (reply) return this.replyCommand(doc.uri, reply.messageId);
   }
   private replyCommand(uri: vscode.Uri, messageId: string): vscode.Uri {
     return vscode.Uri.parse(`command:qq.reply?${encodeURIComponent(JSON.stringify([uri.toString(), messageId]))}`);
@@ -85,6 +101,13 @@ export class Transcript implements vscode.DocumentLinkProvider, vscode.HoverProv
   }
   async provideHover(doc: vscode.TextDocument, pos: vscode.Position, token: vscode.CancellationToken): Promise<vscode.Hover | undefined> {
     const key = this.key(doc.uri); if (!key) return;
+    const mention = this.rendered.get(key)?.mentions.find(s => s.line === pos.line && pos.character >= s.start && pos.character < s.end);
+    if (mention) {
+      const md = new vscode.MarkdownString(); md.appendText(`@ ${mention.name} · ${mention.qq}`);
+      md.appendMarkdown(`\n\n[加入 @ 到草稿](${this.mentionCommand(doc.uri, mention.qq, mention.name).toString()})`);
+      md.isTrusted = { enabledCommands: ['qq.insertMention'] };
+      return new vscode.Hover(md, new vscode.Range(mention.line, mention.start, mention.line, mention.end));
+    }
     const file = this.rendered.get(key)?.files.find(f => f.line === pos.line && pos.character >= f.start && pos.character <= f.end);
     if (file) {
       const message = this.store.messages.get(key)?.find(m => m.id === file.messageId);

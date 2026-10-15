@@ -1,3 +1,4 @@
+import { mentionText } from './mentions';
 import { Attachment, Draft, emptyDraft, attachmentPattern, inline } from './model';
 
 export class DraftService {
@@ -7,8 +8,21 @@ export class DraftService {
   draft(key: string): Draft { return this.values.get(key) ?? emptyDraft(); }
   setDraft(key: string, text: string, replyId?: string, attachments = this.draft(key).attachments): Draft {
     const replyChanged = this.draft(key).replyId !== replyId;
-    const next = { text, replyId, attachments, version: this.draft(key).version + 1 };
+    const next = { ...this.draft(key), text, replyId, attachments, version: this.draft(key).version + 1 };
     this.values.set(key, next); this.changed(key, replyChanged); return next;
+  }
+  reserveMention(key: string, qq: string, name: string): string {
+    if (!/^(?:\d+|all)$/.test(qq)) throw new Error('无效的群成员');
+    const draft = this.draft(key), mentions = draft.mentions ?? {};
+    const label = name || (qq === 'all' ? '全体成员' : qq);
+    let token = mentionText(label), number = 2;
+    if (mentions[token] && mentions[token] !== qq) token = mentionText(`${label} (${qq})`);
+    while (mentions[token] && mentions[token] !== qq) token = mentionText(`${label} (${qq}, ${number++})`);
+    // Reserve without changing the text or emitting editor updates while a
+    // completion menu is open. The accepted edit persists the binding with it.
+    mentions[token] = qq;
+    this.values.set(key, { ...draft, mentions });
+    return token;
   }
   clearDraftIfVersion(key: string, version: number): boolean {
     if (this.draft(key).version !== version) return false;

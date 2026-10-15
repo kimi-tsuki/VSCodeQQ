@@ -1,9 +1,10 @@
+import { draftMentions } from './mentions';
 import { randomUUID } from 'node:crypto';
 import { ChatStore } from './store';
 import { OneBotClient, OneBotRequestError } from './onebot';
 import { AttachmentFiles } from './attachments';
 import { uploadToNapCat } from './fileUpload';
-import { Attachment, Message, draftParts, outgoingDrafts, id, parseMessage, splitKey } from './model';
+import { Attachment, Message, Segment, draftParts, outgoingDrafts, id, parseMessage, splitKey } from './model';
 import { AccountSession } from './accountSession';
 interface OutboxHost {
   store?: ChatStore; attachments?: AttachmentFiles; client: OneBotClient;
@@ -21,8 +22,13 @@ export class OutboxService {
     if (store !== this.host.store || !this.host.ready) throw new Error('NapCat 未连接，草稿已保留');
     const pendingKey = `${store.selfId}:${key}`;
     const draft = store.draft(key);
-    const captured = draft.text === text && draft.replyId === replyId ? draft : store.setDraft(key, text, replyId);
+    const current = draft.text === text && draft.replyId === replyId ? draft : store.setDraft(key, text, replyId);
+    const captured = { ...current, mentions: current.mentions ? { ...current.mentions } : undefined };
     const drafts = outgoingDrafts(captured);
+    // Validate before creating outgoing records or clearing the draft.
+    if (key.startsWith('group:')) for (const outgoing of drafts) {
+      for (const part of draftParts(outgoing.text, outgoing.attachments)) if (typeof part === 'string') draftMentions(part, outgoing.mentions);
+    }
     const tasks: Promise<boolean>[] = [], messageIds: string[] = [];
     for (const outgoing of drafts) {
       const parts = draftParts(outgoing.text, outgoing.attachments);
@@ -31,7 +37,10 @@ export class OutboxService {
         time: Math.floor(Date.now() / 1000), mentioned: false, replyId: outgoing.replyId,
         sendState: this.sendQueues.has(pendingKey) ? 'queued' : 'sending', outgoing,
         localImages: parts.filter((p): p is Attachment => typeof p !== 'string' && p.kind === 'image'),
-        segments: parts.map(p => typeof p === 'string' ? { type: 'text' as const, text: p } : p.kind === 'image' ? { type: 'image' as const, image: { file: '' } } : { type: 'text' as const, text: p.kind === 'file' ? p.placeholder ?? `[文件:${p.label}]` : `[表情:${p.faceId}]` })
+        segments: parts.flatMap<Segment>(p => typeof p === 'string'
+          ? (key.startsWith('group:') ? draftMentions(p, outgoing.mentions) : [p]).map(part => typeof part === 'string' ? { type: 'text' as const, text: part } : { type: 'mention' as const, qq: part.qq, name: part.text.startsWith('[@:') ? part.text.slice(3, -1) : undefined, text: part.text })
+          : p.kind === 'image' ? [{ type: 'image' as const, image: { file: '' } }]
+          : [{ type: 'text' as const, text: p.kind === 'file' ? p.placeholder ?? `[文件:${p.label}]` : `[表情:${p.faceId}]` }])
       };
       store.add(local, false); messageIds.push(local.id);
       tasks.push(this.enqueue(store, local));
@@ -89,12 +98,9 @@ export class OutboxService {
         let index = 0;
         for (const part of parts) {
           if (typeof part !== 'string') { segments.push(media[index++]); continue; }
-          let start = 0;
-          if (message.chatKey.startsWith('group:')) for (const match of part.matchAll(/@\[(\d+)\]/g)) {
-            if (match.index! > start) segments.push({ type: 'text', data: { text: part.slice(start, match.index) } });
-            segments.push({ type: 'at', data: { qq: match[1] } }); start = match.index! + match[0].length;
+          for (const value of message.chatKey.startsWith('group:') ? draftMentions(part, draft.mentions) : [part]) {
+            segments.push(typeof value === 'string' ? { type: 'text', data: { text: value } } : { type: 'at', data: { qq: value.qq } });
           }
-          if (start < part.length) segments.push({ type: 'text', data: { text: part.slice(start) } });
         }
         const chat = splitKey(message.chatKey);
         requested = true;

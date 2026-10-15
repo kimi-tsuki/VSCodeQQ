@@ -64,7 +64,7 @@ test('旧 v2 缓存的 @ 和文件迁移为明确消息类型，普通 @ 文本�
     await store.restore(); await store.load(chat.key);
     assert.deepEqual(store.messages.get(chat.key)![0].segments.map(s => s.type), ['mention', 'text', 'file']);
     store.setMembers(chat.key, [{ user_id: 789, card: '名片' }]);
-    assert.equal(messageText(store.displayMessages(chat.key)[0]), '@名片 @789 [文件:a.txt]');
+    assert.equal(messageText(store.displayMessages(chat.key)[0]), '[@:名片] @789 [文件:a.txt]');
     store.history(chat.key, []); await store.flush();
     const persisted = JSON.parse(await fs.readFile(path.join(folder, 'group-1.json'), 'utf8'));
     assert.equal(persisted[0].segments[0].qq, '789');
@@ -130,4 +130,58 @@ test('免打扰例外只属于当前消息，未读会话的 @/回复标记不�
   assert.equal(allowsMessageNotification({ ...chat, notification: 'unknown' }, false, false), false);
   assert.equal(allowsMessageNotification({ ...chat, ignoreUnread: true }, true, true), false);
   assert.equal(allowsMessageNotification({ ...chat, notification: 'notify' }, false, false), true);
+});
+
+
+test('具名提及绑定真实号码，同名、改名、重启和失败重试都不换人', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-named-mentions-')), store = new ChatStore(folder, '123456');
+  const backend = new MockNapCat(), client = new OneBotClient(), session = new AccountSession();
+  await backend.start(); await client.connect(backend.url); store.upsert(newChat('group', 20002, '群'));
+  const outbox = new OutboxService({ store, client, session, ready: true, log: () => {} });
+  try {
+    const a = store.reserveMention('group:20002', '10001', '同名'), b = store.reserveMention('group:20002', '10002', '同名');
+    assert.equal(a, '[@:同名]'); assert.notEqual(a, b);
+    const special = store.reserveMention('group:20002', '10003', '名字[带]括号\n换行');
+    assert.equal(special, '[@:名字［带］括号 换行]');
+    store.setDraft('group:20002', `前${a}中${b}后`); await store.flush();
+    const restored = new ChatStore(folder, '123456');
+    try {
+      await restored.restore(); assert.equal(restored.draft('group:20002').mentions?.[a], '10001');
+      assert.equal(restored.draft('group:20002').mentions?.[b], '10002');
+    } finally { await restored.dispose(); }
+    backend.failSend = true;
+    const pending = outbox.submit(store, 'group:20002', store.draft('group:20002').text);
+    assert.equal(store.draft('group:20002').text, '');
+    assert.equal(await pending.completion, false);
+    const capturedBindings = store.messages.get('group:20002')!.find(m => m.id === pending.messageIds[0])!.outgoing!.mentions!;
+    const later = store.reserveMention('group:20002', '10004', '稍后候选');
+    assert.equal(capturedBindings[later], undefined, '待发送绑定快照不被新候选修改');
+    store.setMembers('group:20002', [{ user_id: 10001, card: '改名' }, { user_id: 99999, card: '同名' }]);
+    backend.failSend = false;
+    const failed = store.messages.get('group:20002')!.find(m => m.id === pending.messageIds[0])!;
+    assert.equal(await outbox.enqueue(store, failed), true);
+    assert.deepEqual(backend.sent.at(-1).message.map((s: any) => s.type === 'at' ? s.data.qq : s.data.text), ['前', '10001', '中', '10002', '后']);
+    const deleted = outbox.submit(store, 'group:20002', '已删除占位符'); assert.equal(await deleted.completion, true);
+    assert.ok(backend.sent.at(-1).message.every((s: any) => s.type !== 'at'));
+    store.setDraft('group:20002', '[@:没有绑定]'); const count = store.messages.get('group:20002')!.length;
+    assert.throws(() => outbox.submit(store, 'group:20002', '[@:没有绑定]'), /没有对应群成员/);
+    assert.equal(store.draft('group:20002').text, '[@:没有绑定]'); assert.equal(store.messages.get('group:20002')!.length, count);
+    const legacy = outbox.submit(store, 'group:20002', '@[10001] 旧草稿'); assert.equal(await legacy.completion, true);
+    assert.equal(backend.sent.at(-1).message[0].data.qq, '10001');
+  } finally { client.dispose(); await backend.close(); await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+test('群折叠按账号保存，好友不能折叠，收藏和未读仍保留', async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-folded-')), store = new ChatStore(folder, '123');
+  try {
+    const group = newChat('group', 1, '群'), friend = newChat('private', 2, '友'); store.upsert(group); store.upsert(friend);
+    store.toggleFavorite(group.key); group.unread = 3;
+    store.toggleCollapsed(group.key); store.toggleCollapsed(friend.key); await store.flush();
+    assert.deepEqual([...store.collapsed], [group.key]); assert.equal(group.unread, 3); assert.ok(store.favorites.has(group.key));
+    const restored = new ChatStore(folder, '123');
+    try {
+      await restored.restore(); assert.ok(restored.collapsed.has(group.key)); assert.ok(restored.favorites.has(group.key));
+      restored.toggleCollapsed(group.key); assert.equal(restored.collapsed.size, 0);
+    } finally { await restored.dispose(); }
+  } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
 });

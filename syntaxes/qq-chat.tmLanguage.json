@@ -14,6 +14,10 @@
         {
           "match": "\\[(?:图片|表情):\\d+\\]",
           "name": "constant.other.placeholder.c"
+        },
+        {
+          "match": "\\[@:[^\\]\\r\\n]+\\]|@\\[\\d+\\]",
+          "name": "constant.other.placeholder.c"
         }
       ]
     },
@@ -22,7 +26,7 @@
       "name": "keyword.control.directive.define.c"
     },
     {
-      "match": "\\b(?:INFO|CHAT_NAME|GROUP_ID|FRIEND_ID)\\b",
+      "match": "\\b(?:DATE|CHAT_NAME|GROUP_ID|FRIEND_ID)\\b",
       "name": "entity.name.function.preprocessor.c"
     },
     {

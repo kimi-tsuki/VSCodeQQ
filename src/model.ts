@@ -45,7 +45,7 @@ export interface Message {
 }
 export interface Member { id: string; name: string; title: string; role: string; nickname?: string; }
 export interface Attachment { id: string; kind: 'image' | 'face' | 'file'; label: string; size?: number; file?: string; faceId?: string; sticker?: boolean; placeholder?: string; }
-export interface Draft { text: string; replyId?: string; version: number; attachments: Attachment[]; }
+export interface Draft { text: string; replyId?: string; version: number; attachments: Attachment[]; mentions?: Record<string, string>; }
 export const emptyDraft = (): Draft => ({ text: '', version: 0, attachments: [] });
 export const attachmentPattern = /\[(?:(?:图片|表情):\d+|文件:[^\]\r\n]+)\]/g;
 export function draftParts(text: string, attachments: Attachment[]): (string | Attachment)[] {

@@ -34,9 +34,10 @@ test('八种代码风格保留原文、图片、引用和操作位置', () => {
     for (const marker of markers[language]) assert.ok(view.text.includes(marker), `${language}: ${marker}`);
     assert.equal(view.images.length, 2);
     for (const span of view.images) assert.equal(lines[span.line].slice(span.start, span.end), '[图片]');
-    assert.equal(view.actions.length, 2);
+    assert.ok(view.actions.some(a => a.kind === 'reply')); assert.equal(view.actions.filter(a => a.kind === 'retry').length, 1);
     for (const action of view.actions) {
-      assert.equal(lines[action.line].slice(action.start, action.start + 4), action.kind === 'reply' ? '[回复]' : '[重试]');
+      assert.ok(lines[action.line].slice(action.start, action.end).length);
+      if (action.kind === 'retry') assert.equal(lines[action.line].slice(action.start, action.end), '[重试]');
       assert.equal(view.messages.get(action.line), msg.id);
     }
     assert.ok(view.ownLines.includes(view.starts.get(msg.id)!));
@@ -112,19 +113,32 @@ test('代码投影转义引号、反斜杠、控制字符；多行和图片位�
   for (const s of view.images) assert.equal(view.text.split('\n')[s.line].slice(s.start, s.end), '[图片]');
 });
 
-test('INFO、引用字段与操作位置分离，正文中的伪按钮不会成为操作', () => {
+test('DATE、头衔与名称字段保留操作位置，备注同行且省略额外昵称', () => {
   const original = parseMessage({ message_id: 10, user_id: 123, message: '原文' }, 'group:1', '123');
   const reply = parseMessage({ message_id: 11, sender: { user_id: 456, card: '群名片', title: '头衔', role: 'admin' }, message: [{ type: 'reply', data: { id: 10 } }, { type: 'text', data: { text: '[回复]\\n[重试]' } }] }, 'group:1', '123');
+  reply.time = new Date(2026, 9, 15, 9, 5, 13).getTime() / 1000;
+  reply.senderRemark = '好友备注'; reply.senderNickname = '不再额外显示的昵称';
   const mine = { ...original, id: 'local:failed', sendState: 'failed' as const };
   const view = renderTranscript(newChat('group', 1, '测试'), [original, reply, mine], '123');
   const lines = view.text.split('\n');
-  assert.ok(view.text.includes('#define INFO "头衔" "群名片"'));
+  assert.equal(lines[view.starts.get(reply.id)!], '#define DATE "2026-10-15 09:05:13"');
+  assert.ok(view.text.includes('char title[] = "头衔";\n    char name[] = "群名片";  // 备注：好友备注\n    char replay[]'));
+  assert.ok(!view.text.includes('INFO') && !view.text.includes('不再额外显示的昵称'));
+  for (const language of codeLanguages) {
+    const style = codeStyle(language);
+    const text = renderTranscript(newChat('group', 1, '测试'), [reply], '123', language).text;
+    assert.ok(text.includes(style.constant('DATE', ['"2026-10-15 09:05:13"'])), language);
+    assert.ok(text.includes(style.string('title') + '头衔' + style.stringEnd), language);
+    assert.ok(text.includes(style.string('name') + '群名片' + style.stringEnd + `  ${style.comment} 备注：好友备注`), language);
+    const minimal = renderTranscript(newChat('private', 1, '好友'), [{ ...reply, senderTitle: '', senderRemark: reply.senderName }], '123', language).text;
+    assert.ok(!minimal.includes(style.string('title')) && !minimal.includes('备注：'), language);
+  }
   assert.ok(view.text.includes('void reply_456(void) {  // 管理员 · 回复我'));
   assert.ok(view.text.includes('char replay[] = "123：原文";'));
-  assert.equal(view.actions.filter(a => a.kind === 'reply').length, 2);
+  assert.deepEqual([...new Set(view.actions.filter(a => a.kind === 'reply').map(a => a.messageId))], ['10', '11']);
   for (const a of view.actions) {
-    assert.equal(lines[a.line].slice(a.start, a.start + 4), a.kind === 'reply' ? '[回复]' : '[重试]');
-    assert.ok(a.kind === 'reply' ? lines[a.line].endsWith(';  // [回复]') : lines[a.line].startsWith('}  // 发送失败'));
+    assert.ok(lines[a.line].slice(a.start, a.end).length);
+    assert.ok(a.kind === 'reply' ? lines[a.line].includes('char msg[]') && !lines[a.line].includes('// [回复]') : lines[a.line].startsWith('}  // 发送失败'));
   }
 });
 
@@ -457,20 +471,41 @@ test('真实 @ 按群名片/昵称显示，成员更新刷新引用，普通数�
     store.add(parseMessage({ message_id: 11, user_id: 123, message: [
       { type: 'reply', data: { id: 10 } }, { type: 'text', data: { text: '回复' } }
     ] }, chat.key, '123'), false);
-    assert.ok(messageText(store.displayMessages(chat.key)[0]).startsWith('@789'));
+    assert.ok(messageText(store.displayMessages(chat.key)[0]).startsWith('[@:789]'));
     store.setMembers(chat.key, [{ user_id: 789, card: '群名片', nickname: '昵称' }]);
-    assert.equal(messageText(store.displayMessages(chat.key)[0]), '@群名片 @789 @全体成员@服务端昵称');
+    assert.equal(messageText(store.displayMessages(chat.key)[0]), '[@:群名片] @789 [@:全体成员][@:服务端昵称]');
     const rendered = renderTranscript(chat, store.displayMessages(chat.key), '123');
-    assert.ok(rendered.text.split('\n').some(l => l.includes('replay') && l.includes('@群名片')));
+    assert.ok(rendered.text.split('\n').some(l => l.includes('replay') && l.includes('[@:群名片]')));
     assert.equal(messageText(message), raw);
     store.setMembers(chat.key, [{ user_id: 789, nickname: '新昵称' }]);
-    assert.ok(messageText(store.displayMessages(chat.key)[0]).startsWith('@新昵称'));
+    assert.ok(messageText(store.displayMessages(chat.key)[0]).startsWith('[@:新昵称]'));
     await store.flush();
     const restored = new ChatStore(folder, '123');
     try {
       await restored.restore(); await restored.load(chat.key);
       restored.setMembers(chat.key, [{ user_id: 789, card: '恢复名片' }]);
-      assert.ok(messageText(restored.displayMessages(chat.key)[0]).startsWith('@恢复名片'));
+      assert.ok(messageText(restored.displayMessages(chat.key)[0]).startsWith('[@:恢复名片]'));
     } finally { await restored.dispose(); }
   } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
+
+test('正文回复和真实提及各有独立区域，发送成功不显示状态', () => {
+  const message = parseMessage({ message_id: 45, sender: { user_id: 456, card: '群名片' }, message: [
+    { type: 'text', data: { text: '正文 😀\n下一行' } }, { type: 'at', data: { qq: 789, name: '成员' } },
+    { type: 'image', data: { file: 'a' } }, { type: 'file', data: { file_id: 'f', name: '报告.txt' } }
+  ] }, 'group:1', '123');
+  for (const language of codeLanguages) {
+    const view = renderTranscript(newChat('group', 1, '群'), [message], '123', language), lines = view.text.split('\n');
+    assert.equal(view.mentions.length, 2, language);
+    assert.equal(view.mentions.find(s => s.qq === '456') && lines[view.mentions[0].line].slice(view.mentions[0].start, view.mentions[0].end), '群名片');
+    assert.ok(view.actions.some(a => lines[a.line].slice(a.start, a.end).includes('正文')), language);
+    const overlaps = (a: { line: number; start: number; end: number }, b: typeof a) => a.line === b.line && a.start < b.end && b.start < a.end;
+    for (const action of view.actions) for (const special of [...view.mentions, ...view.images, ...view.files]) assert.equal(overlaps(action, special), false, language);
+    assert.ok(!view.text.includes('[回复]'), language);
+    const sent = renderTranscript(newChat('group', 1, '群'), [{ ...message, senderId: '123', sendState: 'sent' }], '123', language);
+    assert.ok(!sent.text.includes('已发送') && !sent.text.includes('发送中'), language);
+    const sending = renderTranscript(newChat('group', 1, '群'), [{ ...message, senderId: '123', sendState: 'sending' }], '123', language);
+    assert.ok(sending.text.includes('发送中'), language);
+  }
 });

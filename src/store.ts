@@ -1,15 +1,17 @@
+import { mentionText, restoredMentions } from './mentions';
 import { DraftService } from './draftService';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Attachment, Chat, Draft, Member, Message, id, inline, isPending, mergeMessages, normalizeSegments, messageText, splitKey } from './model';
 
-export type StoreChange = 'messages' | 'chat' | 'members' | 'unread' | 'favorites' | 'notification';
+export type StoreChange = 'messages' | 'chat' | 'members' | 'unread' | 'favorites' | 'collapsed' | 'notification';
 export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreChange]; draft: [key: string, replyChanged: boolean]; storageError: [error: Error] }> {
   readonly chats = new Map<string, Chat>();
   readonly messages = new Map<string, Message[]>();
   readonly outbox = new Map<string, Message>();
   readonly favorites = new Set<string>();
+  readonly collapsed = new Set<string>();
   readonly draftService = new DraftService((key, replyChanged) => { this.schedule(); this.emit('draft', key, replyChanged); });
   get drafts() { return this.draftService.values; }
   readonly members = new Map<string, Map<string, Member>>();
@@ -32,10 +34,11 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
         this.outbox.set(message.id, message);
         this.messages.set(message.chatKey, [...this.messages.get(message.chatKey) ?? [], message]);
       }
+      for (const key of data.collapsed ?? []) if (this.chats.get(key)?.type === 'group') this.collapsed.add(key);
       for (const key of data.favorites ?? []) if (this.chats.has(key)) this.favorites.add(key);
       for (const [key, draft] of Object.entries(data.drafts ?? {})) {
         const d = draft as Draft;
-        if (this.chats.has(key) && typeof d.text === 'string') this.drafts.set(key, { text: d.text, replyId: d.replyId, version: Number(d.version) || 0, attachments: Array.isArray(d.attachments) ? d.attachments : [] });
+        if (this.chats.has(key) && typeof d.text === 'string') this.drafts.set(key, { text: d.text, replyId: d.replyId, version: Number(d.version) || 0, attachments: Array.isArray(d.attachments) ? d.attachments : [], mentions: restoredMentions(d.mentions) });
       }
     } catch (error: any) { if (error.code !== 'ENOENT') this.emit('storageError', new Error('本地会话缓存无法读取，已使用空缓存')); }
   }
@@ -111,7 +114,7 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
         const friend = this.chats.get(`private:${segment.qq}`);
         const displayName = (member?.name !== segment.qq ? member?.name : undefined)
           || segment.name || friend?.remark || friend?.nickname || friend?.name || segment.qq;
-        return { ...segment, text: segment.qq === 'all' ? '@全体成员' : `@${displayName}` };
+        return { ...segment, name: segment.qq === 'all' ? '全体成员' : displayName, text: mentionText(segment.qq === 'all' ? '全体成员' : displayName) };
       });
       return { ...message, segments, senderName: name, senderRemark: friend ? friend.remark : undefined, senderNickname: member?.nickname || message.senderNickname || (friend ? friend.nickname : undefined), senderTitle: member?.title || message.senderTitle, senderRole: member?.role || message.senderRole };
     });
@@ -164,6 +167,11 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
     const chat = this.chats.get(key);
     if (chat) { chat.ignoreUnread = !chat.ignoreUnread; this.changed(key, 'notification'); }
   }
+  toggleCollapsed(key: string): void {
+    if (this.chats.get(key)?.type !== 'group') return;
+    if (this.collapsed.has(key)) this.collapsed.delete(key); else this.collapsed.add(key);
+    this.changed(key, 'collapsed');
+  }
   toggleFavorite(key: string): void {
     if (!this.chats.has(key)) return;
     if (this.favorites.has(key)) this.favorites.delete(key); else this.favorites.add(key);
@@ -171,6 +179,7 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
   }
   draft(key: string): Draft { return this.draftService.draft(key); }
   setDraft(key: string, text: string, replyId?: string, attachments?: Attachment[]): Draft { return this.draftService.setDraft(key, text, replyId, attachments); }
+  reserveMention(key: string, qq: string, name: string): string { return this.draftService.reserveMention(key, qq, name); }
   clearDraftIfVersion(key: string, version: number): boolean { return this.draftService.clearDraftIfVersion(key, version); }
   completeSend(key: string, captured: Draft): boolean { return this.draftService.completeSend(key, captured); }
   attach(key: string, attachments: Attachment[]): void { this.draftService.attach(key, attachments); }
@@ -194,7 +203,7 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
           await this.atomic(this.file(key), this.messages.get(key) ?? []);
         }
         await this.atomic(path.join(this.folder, 'state.json'), {
-          version: 3, outbox: [...this.outbox.values()], attachmentSerial: this.draftService.attachmentSerial, chats: [...this.chats.values()], favorites: [...this.favorites],
+          version: 3, outbox: [...this.outbox.values()], attachmentSerial: this.draftService.attachmentSerial, chats: [...this.chats.values()], favorites: [...this.favorites], collapsed: [...this.collapsed],
           drafts: Object.fromEntries([...this.drafts].filter(([, d]) => d.text || d.replyId || d.attachments.length))
         });
       } catch {
