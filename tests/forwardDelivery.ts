@@ -10,6 +10,43 @@ import { newChat, parseMessage } from '../src/model';
 import { renderTranscript } from '../src/transcriptRenderer';
 import { deliverForward } from '../src/forwardDelivery';
 
+for (const newerAt of ['receipt', 'detail', 'none'] as const) test(`迟到的转发更新只刷新最新消息摘要：${newerAt}`, async () => {
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-forward-preview-'));
+  const store = new ChatStore(folder, '123'), session = new AccountSession();
+  const target = newChat('private', '456', '目标'); store.upsert(target);
+  let receiptReady!: () => void, detailReady!: () => void;
+  let resolveReceipt!: (value: unknown) => void, resolveDetail!: (value: unknown) => void;
+  const receiptStarted = new Promise<void>(resolve => { receiptReady = resolve; });
+  const detailStarted = new Promise<void>(resolve => { detailReady = resolve; });
+  const receipt = new Promise(resolve => { resolveReceipt = resolve; });
+  const detail = new Promise(resolve => { resolveDetail = resolve; });
+  const host = { store, session, ready: true, client: { call: (async (action: string) => {
+    if (action === 'get_msg') { detailReady(); return detail; }
+    receiptReady(); return receipt;
+  }) as OneBotClient['call'] } };
+  try {
+    const task = deliverForward(host, target, [parseMessage({ message_id: 11, message: '转发预览' }, target.key)], false, () => {});
+    await receiptStarted;
+    const time = store.messages.get(target.key)![0].time;
+    const addNewer = () => store.add(parseMessage({ message_id: 1000, user_id: 456, time, message: '后收到的新消息' }, target.key), false);
+    if (newerAt === 'receipt') addNewer();
+    resolveReceipt({ message_id: 999 });
+    await detailStarted;
+    if (newerAt === 'detail') addNewer();
+    assert.equal(store.chats.get(target.key)!.preview, newerAt === 'none' ? '转发预览' : '后收到的新消息');
+    resolveDetail({ message_id: 999, user_id: 123, time, message: [{ type: 'forward', data: { id: 'actual-resource' } }] });
+    await task;
+    assert.equal(store.messages.get(target.key)!.at(-1)!.id, newerAt === 'none' ? '999' : '1000');
+    assert.equal(store.chats.get(target.key)!.preview, newerAt === 'none' ? '[合并转发]' : '后收到的新消息');
+    assert.equal(store.chats.get(target.key)!.lastTime, time);
+    assert.equal(store.messages.get(target.key)!.find(m => m.id === '999')!.segments[0].type, 'forward');
+    // Correcting the latest message's timestamp must not move the conversation backwards.
+    const latest = store.messages.get(target.key)!.at(-1)!;
+    store.enrichMessage({ ...latest, time: time - 1 }, true);
+    assert.equal(store.chats.get(target.key)!.lastTime, time);
+  } finally { await store.dispose(); await fs.rm(folder, { recursive: true, force: true }); }
+});
+
 for (const merged of [false, true]) for (const echo of ['none', 'before', 'after']) test(`转发结算：merged=${merged}, echo=${echo}，目标可见且不重复`, async () => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'qq-forward-'));
   const store = new ChatStore(folder, '123'), session = new AccountSession();

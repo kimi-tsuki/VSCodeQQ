@@ -166,5 +166,7 @@ export function mergeMessages(history: Message[], live: Message[], limit: number
   }
   const sorted = [...values.values()].sort((a, b) => a.time - b.time);
   const retained = sorted.filter(m => !isPending(m)).slice(-limit);
-  return [...retained, ...sorted.filter(isPending)].sort((a, b) => a.time - b.time);
+  // Keep the stable order of equal-second messages when retaining pending sends.
+  const retainedIds = new Set(retained.map(m => m.id));
+  return sorted.filter(m => isPending(m) || retainedIds.has(m.id));
 }

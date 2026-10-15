@@ -145,7 +145,9 @@ export class ChatStore extends EventEmitter<{ change: [key: string, kind: StoreC
   }
   private updatePreview(message: Message): void {
     const chat = this.chats.get(message.chatKey);
-    if (chat && (message.time >= chat.lastTime || this.messages.get(message.chatKey)?.at(-1)?.id === message.id)) {
+    // Detail/receipt updates can arrive after a newer message in the same second.
+    // Only the current last message owns the preview, regardless of equal timestamps.
+    if (chat && this.messages.get(message.chatKey)?.at(-1)?.id === message.id) {
       chat.lastTime = Math.max(chat.lastTime, message.time);
       chat.preview = message.recalled ? '[消息已撤回]' : messageText(message).replace(/\s+/g, ' ').slice(0, 100);
     }
